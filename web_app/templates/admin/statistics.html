@@ -1,0 +1,115 @@
+{% extends 'base.html' %}
+{% block title %}Admin – Thống kê{% endblock %}
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+{% endblock %}
+{% block content %}
+<h4 class="fw-bold mb-4"><i class="bi bi-bar-chart-line me-2 text-warning"></i>Thống kê hệ thống</h4>
+
+<div class="row g-4">
+  <!-- Predictions over time -->
+  <div class="col-12">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-white fw-bold">Dự đoán theo ngày (30 ngày gần nhất)</div>
+      <div class="card-body"><canvas id="chartTime" height="80"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Top drugs -->
+  <div class="col-md-6">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-white fw-bold">Top 10 thuốc được tra cứu nhiều nhất</div>
+      <div class="card-body"><canvas id="chartDrugs"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Top diseases -->
+  <div class="col-md-6">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-white fw-bold">Top 10 bệnh được tra cứu nhiều nhất</div>
+      <div class="card-body"><canvas id="chartDiseases"></canvas></div>
+    </div>
+  </div>
+
+  <!-- By type pie -->
+  <div class="col-md-4">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-white fw-bold">Phân loại truy vấn</div>
+      <div class="card-body"><canvas id="chartType"></canvas></div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const stats = {{ stat_data | tojson }};
+
+// Time chart
+new Chart(document.getElementById('chartTime'), {
+  type: 'line',
+  data: {
+    labels: stats.predictions_per_day.map(r => r.date),
+    datasets: [{
+      label: 'Số dự đoán',
+      data: stats.predictions_per_day.map(r => r.count),
+      borderColor: '#0d6efd',
+      backgroundColor: 'rgba(13,110,253,0.1)',
+      tension: 0.3,
+      fill: true,
+    }]
+  },
+  options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+});
+
+// Top drugs
+new Chart(document.getElementById('chartDrugs'), {
+  type: 'bar',
+  data: {
+    labels: stats.top_drugs.map(r => r.query_name),
+    datasets: [{
+      label: 'Lượt tra cứu',
+      data: stats.top_drugs.map(r => r.count),
+      backgroundColor: '#198754',
+    }]
+  },
+  options: {
+    indexAxis: 'y',
+    plugins: { legend: { display: false } },
+    scales: { x: { beginAtZero: true } }
+  }
+});
+
+// Top diseases
+new Chart(document.getElementById('chartDiseases'), {
+  type: 'bar',
+  data: {
+    labels: stats.top_diseases.map(r => r.query_name),
+    datasets: [{
+      label: 'Lượt tra cứu',
+      data: stats.top_diseases.map(r => r.count),
+      backgroundColor: '#dc3545',
+    }]
+  },
+  options: {
+    indexAxis: 'y',
+    plugins: { legend: { display: false } },
+    scales: { x: { beginAtZero: true } }
+  }
+});
+
+// By type
+const typeMap = { drug: 'Thuốc → Bệnh', disease: 'Bệnh → Thuốc' };
+new Chart(document.getElementById('chartType'), {
+  type: 'doughnut',
+  data: {
+    labels: stats.by_type.map(r => typeMap[r.query_type] || r.query_type),
+    datasets: [{
+      data: stats.by_type.map(r => r.count),
+      backgroundColor: ['#0d6efd', '#dc3545'],
+    }]
+  },
+  options: { plugins: { legend: { position: 'bottom' } } }
+});
+</script>
+{% endblock %}

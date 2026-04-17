@@ -1,0 +1,9 @@
+Flask>=2.3.0
+numpy>=1.24
+pandas>=2.0
+werkzeug>=2.3
+google-genai>=1.0
+replicate>=0.25.0
+# Optional — only needed if using the trained GNN model:
+# torch>=2.0
+# dgl>=1.1

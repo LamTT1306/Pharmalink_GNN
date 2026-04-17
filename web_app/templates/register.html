@@ -1,0 +1,131 @@
+{% extends 'base.html' %}
+{% block title %}Đăng ký – PharmaLink_GNN{% endblock %}
+{% block main_class_auth %}auth-wrapper{% endblock %}
+{% block auth_content %}
+
+<!-- Animated blobs -->
+<div class="auth-blob auth-blob-1"></div>
+<div class="auth-blob auth-blob-2"></div>
+<div class="auth-blob auth-blob-3"></div>
+
+<div class="auth-card">
+
+  <!-- ── LEFT: Brand panel ── -->
+  <div class="auth-brand">
+    <!-- Network SVG -->
+    <svg class="auth-network" viewBox="0 0 300 500" xmlns="http://www.w3.org/2000/svg">
+      <line x1="80"  y1="90"  x2="160" y2="160"/>
+      <line x1="220" y1="90"  x2="160" y2="160"/>
+      <line x1="160" y1="160" x2="160" y2="270"/>
+      <line x1="40"  y1="220" x2="160" y2="160"/>
+      <line x1="260" y1="220" x2="160" y2="160"/>
+      <line x1="40"  y1="220" x2="100" y2="330"/>
+      <line x1="260" y1="220" x2="220" y2="330"/>
+      <line x1="160" y1="270" x2="100" y2="330"/>
+      <line x1="160" y1="270" x2="220" y2="330"/>
+      <line x1="100" y1="330" x2="160" y2="410"/>
+      <line x1="220" y1="330" x2="160" y2="410"/>
+      <circle cx="80"  cy="90"  r="5"/>
+      <circle cx="220" cy="90"  r="4"/>
+      <circle cx="160" cy="160" r="8"/>
+      <circle cx="40"  cy="220" r="4"/>
+      <circle cx="260" cy="220" r="5"/>
+      <circle cx="160" cy="270" r="7"/>
+      <circle cx="100" cy="330" r="5"/>
+      <circle cx="220" cy="330" r="4"/>
+      <circle cx="160" cy="410" r="6"/>
+    </svg>
+
+    <div class="auth-brand-icon">
+      <i class="bi bi-person-plus-fill"></i>
+    </div>
+    <h2>Tham gia<br><span>PharmaLink_GNN</span></h2>
+    <p class="brand-desc">Khám phá hàng nghìn dự đoán<br>liên kết Thuốc–Bệnh bằng AI</p>
+    <div class="auth-stats">
+      <div class="auth-stat">
+        <span class="auth-stat-num">663</span>
+        <span class="auth-stat-lbl">Thuốc</span>
+      </div>
+      <div class="auth-stat">
+        <span class="auth-stat-num">409</span>
+        <span class="auth-stat-lbl">Bệnh</span>
+      </div>
+      <div class="auth-stat">
+        <span class="auth-stat-num">GNN</span>
+        <span class="auth-stat-lbl">AI Model</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── RIGHT: Form panel ── -->
+  <div class="auth-form">
+    <h3>Tạo tài khoản mới</h3>
+    <p class="auth-sub">Điền thông tin bên dưới để bắt đầu</p>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for cat, msg in messages %}
+          <div class="alert alert-{{ cat }} py-2 px-3 small mb-3">{{ msg }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <form method="POST" novalidate>
+      <div class="mb-3">
+        <label class="form-label">Tên đăng nhập</label>
+        <div class="auth-igroup">
+          <span class="ig-icon"><i class="bi bi-person"></i></span>
+          <input type="text" name="username" placeholder="Ví dụ: user123" required autofocus/>
+        </div>
+      </div>
+      <div class="mb-3">
+        <label class="form-label">Email</label>
+        <div class="auth-igroup">
+          <span class="ig-icon"><i class="bi bi-envelope"></i></span>
+          <input type="email" name="email" placeholder="Địa chỉ email" required/>
+        </div>
+      </div>
+      <div class="mb-3">
+        <label class="form-label">Mật khẩu</label>
+        <div class="auth-igroup">
+          <span class="ig-icon"><i class="bi bi-lock"></i></span>
+          <input type="password" name="password" id="pwd" placeholder="Ít nhất 6 ký tự" required/>
+          <button type="button" class="ig-btn" onclick="togglePwd('pwd','ei1')">
+            <i class="bi bi-eye" id="ei1"></i>
+          </button>
+        </div>
+      </div>
+      <div class="mb-4">
+        <label class="form-label">Xác nhận mật khẩu</label>
+        <div class="auth-igroup">
+          <span class="ig-icon"><i class="bi bi-shield-lock"></i></span>
+          <input type="password" name="confirm_password" id="pwd2" placeholder="Nhập lại mật khẩu" required/>
+          <button type="button" class="ig-btn" onclick="togglePwd('pwd2','ei2')">
+            <i class="bi bi-eye" id="ei2"></i>
+          </button>
+        </div>
+      </div>
+      <button type="submit" class="btn-auth-submit">
+        <i class="bi bi-check-circle me-2"></i>Tạo tài khoản
+      </button>
+    </form>
+
+    <div class="auth-divider">hoặc</div>
+    <p class="auth-footer-link">
+      Đã có tài khoản? <a href="{{ url_for('login') }}">Đăng nhập ngay</a>
+    </p>
+  </div>
+
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+function togglePwd(inputId, iconId) {
+  const p = document.getElementById(inputId);
+  const i = document.getElementById(iconId);
+  if (p.type === 'password') { p.type = 'text';     i.className = 'bi bi-eye-slash'; }
+  else                       { p.type = 'password'; i.className = 'bi bi-eye'; }
+}
+</script>
+{% endblock %}
+

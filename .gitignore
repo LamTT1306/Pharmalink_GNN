@@ -1,0 +1,29 @@
+# Model weights (tải từ Google Drive — xem README)
+web_app/models/*.pt
+web_app/models/*.pth
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# Zip artifacts
+*.zip
+
+# SQLite database (tạo tự động khi chạy app)
+web_app/*.db
+web_app/*.sqlite

@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="vi" data-bs-theme="light">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>{% block title %}PharmaLink_GNN – Dự đoán Thuốc–Bệnh{% endblock %}</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"/>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"/>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}"/>
+  {% block head %}{% endblock %}
+</head>
+<body>
+
+{% if g.user %}
+<!-- ---------- SIDEBAR ---------- -->
+<nav id="sidebar">
+  <div class="sidebar-brand">
+    <a class="brand-logo" href="{{ url_for('dashboard') }}">
+      <div class="logo-icon"><i class="bi bi-diagram-3-fill"></i></div>
+      <div>
+        <h5>PharmaLink_GNN</h5>
+        <small>Drug–Disease Platform</small>
+      </div>
+    </a>
+  </div>
+
+  <p class="nav-section">CHÍNH</p>
+  <ul class="sidebar-nav">
+    <li><a href="{{ url_for('dashboard') }}" class="{% if request.endpoint=='dashboard' %}active{% endif %}">
+      <i class="bi bi-house-door ni"></i> Trang chủ
+    </a></li>
+    <li><a href="{{ url_for('predict_page') }}" class="{% if request.endpoint=='predict_page' %}active{% endif %}">
+      <i class="bi bi-cpu ni"></i> Dự đoán & Phân tích
+    </a></li>
+    <li><a href="{{ url_for('history') }}" class="{% if request.endpoint=='history' %}active{% endif %}">
+      <i class="bi bi-clock-history ni"></i> Lịch sử
+    </a></li>
+  </ul>
+
+  {% if g.user.role == 'admin' %}
+  <p class="nav-section">QUẢN TRỊ</p>
+  <ul class="sidebar-nav">
+    <li><a href="{{ url_for('admin_dashboard') }}" class="{% if request.endpoint=='admin_dashboard' %}active{% endif %}">
+      <i class="bi bi-speedometer2 ni"></i> Tổng quan Admin
+    </a></li>
+    <li><a href="{{ url_for('admin_drugs') }}" class="{% if request.endpoint=='admin_drugs' %}active{% endif %}">
+      <i class="bi bi-capsule ni"></i> Thuốc
+    </a></li>
+    <li><a href="{{ url_for('admin_diseases') }}" class="{% if request.endpoint=='admin_diseases' %}active{% endif %}">
+      <i class="bi bi-heart-pulse ni"></i> Bệnh
+    </a></li>
+    <li><a href="{{ url_for('admin_associations') }}" class="{% if request.endpoint=='admin_associations' %}active{% endif %}">
+      <i class="bi bi-link-45deg ni"></i> Liên kết đã biết
+    </a></li>
+    <li><a href="{{ url_for('admin_proteins') }}" class="{% if request.endpoint=='admin_proteins' %}active{% endif %}">
+      <i class="bi bi-circle-half ni"></i> Protein
+    </a></li>
+    <li><a href="{{ url_for('admin_statistics') }}" class="{% if request.endpoint=='admin_statistics' %}active{% endif %}">
+      <i class="bi bi-bar-chart-line ni"></i> Thống kê
+    </a></li>
+    <li><a href="{{ url_for('admin_users') }}" class="{% if request.endpoint=='admin_users' %}active{% endif %}">
+      <i class="bi bi-people ni"></i> Người dùng
+    </a></li>
+  </ul>
+  {% endif %}
+
+  <div class="sidebar-footer">
+    <div class="user-pill">
+      <div class="avatar">{{ g.user.username[0].upper() }}</div>
+      <div>
+        <div style="font-size:.8rem;color:#e2e8f0;font-weight:600">{{ g.user.username }}</div>
+        <div style="font-size:.65rem;">{% if g.user.role=='admin' %}<span style="color:#fbbf24">Admin</span>{% else %}User{% endif %}</div>
+      </div>
+    </div>
+    <a href="{{ url_for('logout') }}" class="btn btn-sm w-100" style="background:rgba(239,68,68,.15);color:#fca5a5;border:none">
+      <i class="bi bi-box-arrow-right me-1"></i>Đăng xuất
+    </a>
+  </div>
+</nav>
+
+<!-- ---------- MAIN WRAP ---------- -->
+<div id="main-wrap">
+
+  <!-- Topbar -->
+  <div id="topbar">
+    <button class="btn btn-sm btn-light topbar-toggle" onclick="toggleSidebar()">
+      <i class="bi bi-list fs-5"></i>
+    </button>
+    <div>
+      <div class="page-title">{% block page_title %}PharmaLink_GNN{% endblock %}</div>
+      <nav aria-label="breadcrumb" class="d-none d-md-block">
+        <ol class="breadcrumb mb-0">{% block breadcrumb %}<li class="breadcrumb-item active">Trang chủ</li>{% endblock %}</ol>
+      </nav>
+    </div>
+    <div class="topbar-right">
+      <span class="d-none d-sm-inline text-muted small">
+        <span class="pulse-dot me-1"></span>Hệ thống đang hoạt động
+      </span>
+    </div>
+  </div>
+
+  <!-- Flash Messages -->
+  <div class="px-3 pt-2" id="flash-container">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for cat, msg in messages %}
+        <div class="alert alert-{{ cat if cat != 'message' else 'info' }} alert-dismissible fade show" role="alert">
+          {{ msg }}
+          <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+      {% endfor %}
+    {% endwith %}
+  </div>
+
+  <!-- Page Content -->
+  <main class="{% block main_class %}page-body{% endblock %}">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="py-3 px-4 border-top" style="font-size:.75rem;color:#94a3b8;background:#fff">
+    <i class="bi bi-diagram-3-fill text-primary me-1"></i>
+    PharmaLink_GNN &mdash; Hệ thống dự đoán liên kết Thuốc–Bệnh bằng Graph Neural Network &amp; Fuzzy Logic
+  </footer>
+</div><!-- /main-wrap -->
+
+<div id="sidebar-overlay" onclick="toggleSidebar()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:1029"></div>
+
+{% else %}
+<!-- No sidebar for auth pages -->
+<main class="{% block main_class_auth %}{% endblock %}">
+  {% block auth_content %}{% endblock %}
+</main>
+{% endif %}
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="{{ url_for('static', filename='js/main.js') }}"></script>
+<script>
+function toggleSidebar() {
+  const sb = document.getElementById('sidebar');
+  const ov = document.getElementById('sidebar-overlay');
+  if (sb) {
+    sb.classList.toggle('open');
+    if (ov) ov.style.display = sb.classList.contains('open') ? 'block' : 'none';
+  }
+}
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

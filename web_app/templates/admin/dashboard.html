@@ -1,0 +1,120 @@
+{% extends 'base.html' %}
+{% block title %}Admin – Tổng quan{% endblock %}
+{% block content %}
+
+<!-- Admin Hero -->
+<div class="hero-banner mb-4 fade-in-up" style="background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 40%,#312e81 75%,#7c3aed 100%)">
+  <div class="d-flex align-items-center gap-3 position-relative" style="z-index:1">
+    <div style="width:56px;height:56px;border-radius:16px;background:rgba(255,255,255,.18);display:flex;align-items:center;justify-content:center;font-size:2rem">
+      <i class="bi bi-speedometer2"></i>
+    </div>
+    <div>
+      <h4 class="fw-bold mb-1">Bảng điều khiển quản trị</h4>
+      <p class="mb-0 opacity-75 small">Quản lý toàn bộ dữ liệu và người dùng hệ thống PharmaLink_GNN</p>
+    </div>
+  </div>
+</div>
+
+<!-- Stats -->
+<div class="row g-3 mb-4">
+  {% set cards = [
+    ('bi-people','linear-gradient(135deg,#3b82f6,#2563eb)','Người dùng', stats.n_users, url_for('admin_users')),
+    ('bi-capsule','linear-gradient(135deg,#10b981,#059669)','Thuốc', stats.n_drugs, url_for('admin_drugs')),
+    ('bi-heart-pulse','linear-gradient(135deg,#ef4444,#dc2626)','Bệnh', stats.n_diseases, url_for('admin_diseases')),
+    ('bi-circle-half','linear-gradient(135deg,#8b5cf6,#7c3aed)','Protein', stats.n_proteins, url_for('admin_proteins')),
+    ('bi-link-45deg','linear-gradient(135deg,#06b6d4,#0891b2)','Liên kết', stats.n_associations, url_for('admin_associations')),
+    ('bi-clock-history','linear-gradient(135deg,#f59e0b,#d97706)','Dự đoán', stats.n_predictions, url_for('admin_statistics')),
+  ] %}
+  {% for icon, gradient, label, value, link in cards %}
+  <div class="col-6 col-md-4 col-xl-2">
+    <a href="{{ link }}" class="text-decoration-none">
+      <div class="card border-0 shadow-sm h-100 fade-in-up" style="border-radius:16px;overflow:hidden;transition:transform .2s,box-shadow .2s" onmouseenter="this.style.transform='translateY(-5px)';this.style.boxShadow='0 16px 40px rgba(0,0,0,.15)'" onmouseleave="this.style.transform='';this.style.boxShadow=''">
+        <div class="p-3 text-center">
+          <div class="mx-auto mb-2 d-flex align-items-center justify-content-center"
+               style="width:52px;height:52px;border-radius:14px;background:{{ gradient }}">
+            <i class="bi {{ icon }} fs-4 text-white"></i>
+          </div>
+          <div class="fs-2 fw-bold text-dark">{{ value }}</div>
+          <div class="text-muted small fw-500">{{ label }}</div>
+        </div>
+        <div style="height:4px;background:{{ gradient }}"></div>
+      </div>
+    </a>
+  </div>
+  {% endfor %}
+</div>
+
+<div class="row g-3">
+  <!-- Recent predictions -->
+  <div class="col-lg-7">
+    <div class="card border-0 shadow-sm fade-in-up" style="border-radius:16px;overflow:hidden;animation-delay:.1s">
+      <div class="card-header py-3 px-4 border-0" style="background:linear-gradient(135deg,#0f172a,#1e3a5f)">
+        <h6 class="mb-0 fw-bold text-white"><i class="bi bi-activity me-2" style="color:#60a5fa"></i>Dự đoán gần đây (toàn hệ thống)</h6>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-sm align-middle mb-0">
+          <thead style="background:#f8fafc">
+            <tr style="font-size:.72rem;color:#64748b;text-transform:uppercase;letter-spacing:.5px">
+              <th style="padding:.8rem 1rem;border:none">Truy vấn</th>
+              <th style="padding:.8rem 1rem;border:none">Loại</th>
+              <th style="padding:.8rem 1rem;border:none">Người dùng</th>
+              <th style="padding:.8rem 1rem;border:none">Thời gian</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in stat_data.recent_predictions %}
+            <tr style="border-bottom:1px solid #f1f5f9">
+              <td style="padding:.75rem 1rem;font-weight:600">{{ r.query_name }}</td>
+              <td style="padding:.75rem 1rem">
+                {% if r.query_type == 'drug' %}
+                  <span class="badge" style="background:linear-gradient(135deg,#3b82f6,#2563eb);color:#fff;font-size:.68rem">Thuốc</span>
+                {% elif r.query_type == 'disease' %}
+                  <span class="badge" style="background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff;font-size:.68rem">Bệnh</span>
+                {% else %}
+                  <span class="badge" style="background:linear-gradient(135deg,#10b981,#059669);color:#fff;font-size:.68rem">Protein</span>
+                {% endif %}
+              </td>
+              <td style="padding:.75rem 1rem;color:#64748b;font-size:.85rem">{{ r.username or '–' }}</td>
+              <td style="padding:.75rem 1rem;color:#94a3b8;font-size:.78rem">{{ r.created_at[:16].replace('T',' ') }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="4" class="text-center text-muted py-4">Chưa có dữ liệu</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Quick links -->
+  <div class="col-lg-5">
+    <div class="card border-0 shadow-sm fade-in-up" style="border-radius:16px;overflow:hidden;animation-delay:.15s">
+      <div class="card-header py-3 px-4 border-0" style="background:linear-gradient(135deg,#0f172a,#1e3a5f)">
+        <h6 class="mb-0 fw-bold text-white"><i class="bi bi-lightning-charge-fill me-2" style="color:#fbbf24"></i>Thao tác nhanh</h6>
+      </div>
+      <div class="list-group list-group-flush">
+        <a href="{{ url_for('admin_drugs') }}" class="list-group-item list-group-item-action d-flex align-items-center gap-3 py-3 px-4" style="border:none;border-bottom:1px solid #f1f5f9;transition:background .15s">
+          <div style="width:38px;height:38px;border-radius:10px;background:linear-gradient(135deg,#10b981,#059669);display:flex;align-items:center;justify-content:center;color:#fff;font-size:1.1rem;flex-shrink:0"><i class="bi bi-capsule"></i></div>
+          <div><div class="fw-semibold text-dark">Quản lý thuốc</div><div class="text-muted small">Xem, tìm kiếm, chỉnh sửa danh sách thuốc</div></div>
+        </a>
+        <a href="{{ url_for('admin_diseases') }}" class="list-group-item list-group-item-action d-flex align-items-center gap-3 py-3 px-4" style="border:none;border-bottom:1px solid #f1f5f9;transition:background .15s">
+          <div style="width:38px;height:38px;border-radius:10px;background:linear-gradient(135deg,#ef4444,#dc2626);display:flex;align-items:center;justify-content:center;color:#fff;font-size:1.1rem;flex-shrink:0"><i class="bi bi-heart-pulse"></i></div>
+          <div><div class="fw-semibold text-dark">Quản lý bệnh</div><div class="text-muted small">Xem, tìm kiếm, chỉnh sửa danh sách bệnh</div></div>
+        </a>
+        <a href="{{ url_for('admin_associations') }}" class="list-group-item list-group-item-action d-flex align-items-center gap-3 py-3 px-4" style="border:none;border-bottom:1px solid #f1f5f9;transition:background .15s">
+          <div style="width:38px;height:38px;border-radius:10px;background:linear-gradient(135deg,#06b6d4,#0891b2);display:flex;align-items:center;justify-content:center;color:#fff;font-size:1.1rem;flex-shrink:0"><i class="bi bi-link-45deg"></i></div>
+          <div><div class="fw-semibold text-dark">Liên kết đã biết</div><div class="text-muted small">Xem các liên kết thuốc–bệnh đã xác nhận</div></div>
+        </a>
+        <a href="{{ url_for('admin_statistics') }}" class="list-group-item list-group-item-action d-flex align-items-center gap-3 py-3 px-4" style="border:none;border-bottom:1px solid #f1f5f9;transition:background .15s">
+          <div style="width:38px;height:38px;border-radius:10px;background:linear-gradient(135deg,#f59e0b,#d97706);display:flex;align-items:center;justify-content:center;color:#fff;font-size:1.1rem;flex-shrink:0"><i class="bi bi-bar-chart-line"></i></div>
+          <div><div class="fw-semibold text-dark">Thống kê hệ thống</div><div class="text-muted small">Biểu đồ sử dụng và dự đoán</div></div>
+        </a>
+        <a href="{{ url_for('admin_users') }}" class="list-group-item list-group-item-action d-flex align-items-center gap-3 py-3 px-4" style="border:none;transition:background .15s">
+          <div style="width:38px;height:38px;border-radius:10px;background:linear-gradient(135deg,#3b82f6,#2563eb);display:flex;align-items:center;justify-content:center;color:#fff;font-size:1.1rem;flex-shrink:0"><i class="bi bi-people"></i></div>
+          <div><div class="fw-semibold text-dark">Người dùng</div><div class="text-muted small">Quản lý tài khoản và phân quyền</div></div>
+        </a>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
