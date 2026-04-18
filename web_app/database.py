@@ -57,7 +57,9 @@ class Database:
                     disease_idx INTEGER NOT NULL,
                     source TEXT DEFAULT 'dataset',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(drug_idx, disease_idx)
+                    UNIQUE(drug_idx, disease_idx),
+                    FOREIGN KEY (drug_idx) REFERENCES drugs(drug_idx) ON DELETE CASCADE,
+                    FOREIGN KEY (disease_idx) REFERENCES diseases(disease_idx) ON DELETE CASCADE
                 );
                 CREATE TABLE IF NOT EXISTS predictions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -118,7 +118,7 @@
                     <button type="button" id="mol-btn-3d" class="btn btn-primary py-0 px-2" style="font-size:.72rem" onclick="setMolView('3d')"><i class="bi bi-badge-3d-fill me-1"></i>3D xoay</button>
                     <button type="button" id="mol-btn-2d" class="btn btn-outline-secondary py-0 px-2" style="font-size:.72rem" onclick="setMolView('2d')"><i class="bi bi-share-fill me-1"></i>2D</button>
                   </div>
-                  <button type="button" class="btn btn-sm btn-outline-dark py-0 px-2" style="font-size:.72rem;border-radius:8px" onclick="expandMol3D()" title="Phóng to xem toàn màn hình"><i class="bi bi-fullscreen"></i></button>
+                  <button type="button" class="btn btn-sm btn-outline-dark py-0 px-2" style="font-size:.72rem;border-radius:8px" onclick="expandMolCurrent()" title="Phóng to xem toàn màn hình"><i class="bi bi-fullscreen"></i></button>
                 </div>
               </div>
               <!-- 3D viewer (small) -->
@@ -142,12 +142,29 @@
                 </div>
               </div>
               <!-- 2D viewer (hidden initially) -->
-              <div id="mol2d-container" class="d-none" style="width:100%;height:220px;border-radius:12px;overflow:hidden;background:#f8fafc;border:1px solid #e2e8f0;display:flex;align-items:center;justify-content:center">
+              <div id="mol2d-container" class="d-none" style="position:relative;width:100%;height:220px;border-radius:12px;overflow:hidden;background:#f8fafc;border:1px solid #e2e8f0;display:flex;align-items:center;justify-content:center;cursor:pointer" onclick="expandMol2D()">
                 <canvas id="mol2d-canvas" style="max-width:100%;max-height:100%"></canvas>
+                <div class="position-absolute top-0 end-0 m-1" style="z-index:5">
+                  <span class="badge" style="background:rgba(0,0,0,.35);font-size:.6rem"><i class="bi bi-fullscreen me-1"></i>Click để phóng to</span>
+                </div>
               </div>
               <div class="mt-1 small text-muted text-truncate" id="mol-smiles-label" style="font-size:.65rem;font-family:monospace"></div>
             </div>
 
+            <!-- 2D Expand Modal -->
+            <div class="modal fade" id="mol2dExpandModal" tabindex="-1">
+              <div class="modal-dialog modal-xl modal-dialog-centered">
+                <div class="modal-content border-0" style="background:#fff;border-radius:16px;overflow:hidden">
+                  <div class="modal-header py-2 px-4" style="background:#f1f5f9;border-bottom:1px solid #e2e8f0">
+                    <h6 class="modal-title fw-bold mb-0" id="mol2d-expand-title"><i class="bi bi-share-fill me-2 text-primary"></i>Cấu trúc phân tử 2D</h6>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                  </div>
+                  <div class="modal-body d-flex align-items-center justify-content-center" style="height:70vh;background:#f8fafc">
+                    <canvas id="mol2d-canvas-expand-modal" style="max-width:100%;max-height:100%"></canvas>
+                  </div>
+                </div>
+              </div>
+            </div>
             <!-- 3D Expand Modal -->
             <div class="modal fade" id="mol3dExpandModal" tabindex="-1">
               <div class="modal-dialog modal-xl modal-dialog-centered">
@@ -1089,7 +1106,7 @@ function renderSingleResults(data) {
       </td>
       <td>${r.is_known ? '<span class="badge" style="background:#d1fae5;color:#065f46">✓ Đã biết</span>' : '<span class="badge bg-light text-muted">Dự đoán</span>'}</td>
       <td>
-        ${(query_type === 'drug' && !sub_type && idxVal !== undefined) ?
+        ${(query_type === 'drug' && !sub_type && idxVal !== undefined && model !== 'gnn') ?
           `<button class="btn btn-xs btn-outline-warning py-0 px-2" style="font-size:.7rem"
             onclick="openFuzzyModal(${state.selectedDrugIdx},${idxVal})">
             <i class="bi bi-bezier2 me-1"></i>Fuzzy</button>` : ''}
@@ -1839,6 +1856,34 @@ let _molSpinning = true;
 let _currentMolSmiles = '';
 let _currentMolName = '';
 
+function expandMolCurrent() {
+  if (_molCurrentView === '2d') expandMol2D();
+  else expandMol3D();
+}
+
+function expandMol2D() {
+  if (!_currentMolSmiles) return;
+  const titleEl = document.getElementById('mol2d-expand-title');
+  if (titleEl && _currentMolName) titleEl.innerHTML = `<i class="bi bi-share-fill me-2 text-primary"></i>${_currentMolName} – 2D`;
+  const modal = new bootstrap.Modal(document.getElementById('mol2dExpandModal'));
+  modal.show();
+  document.getElementById('mol2dExpandModal').addEventListener('shown.bs.modal', () => {
+    const cvs = document.getElementById('mol2d-canvas-expand-modal');
+    if (!cvs || typeof SmilesDrawer === 'undefined') return;
+    const W = cvs.parentElement.offsetWidth  || 900;
+    const H = cvs.parentElement.offsetHeight || 600;
+    cvs.width  = W;
+    cvs.height = H;
+    try {
+      const drawer = new SmilesDrawer.Drawer({ width: W, height: H, bondThickness: 2,
+        themes: { light: { C: '#1e293b', N: '#2563eb', O: '#dc2626', S: '#ca8a04', P: '#9333ea',
+          F: '#16a34a', Cl: '#16a34a', Br: '#ea580c', I: '#7c3aed', H: '#64748b',
+          DEFAULT: '#1e293b', background: '#f8fafc' } } });
+      SmilesDrawer.parse(_currentMolSmiles, t => drawer.draw(t, 'mol2d-canvas-expand-modal', 'light', false), () => {});
+    } catch(e) {}
+  }, { once: true });
+}
+
 function expandMol3D() {
   if (!_currentMolSmiles && !_currentMolName) return;
   const modal = new bootstrap.Modal(document.getElementById('mol3dExpandModal'));
@@ -2291,8 +2336,8 @@ async function showFuzzyLayerPanel() {
   }
 
   // Extract drug/disease indices from query
-  const drugIdx    = (data.query_type === 'drug')    ? state.selectedDrugIdx    : (results[0].idx ?? 0);
-  const diseaseIdx = (data.query_type === 'disease') ? state.selectedDiseaseIdx : (results[0].idx ?? 0);
+  const drugIdx    = (data.query_type === 'drug')    ? state.selectedDrugIdx    : (results[0].drug_idx ?? results[0].idx ?? 0);
+  const diseaseIdx = (data.query_type === 'disease') ? state.selectedDiseaseIdx : (results[0].disease_idx ?? results[0].idx ?? 0);
 
   document.getElementById('firing-bars').innerHTML =
     '<div class="text-muted small"><div class="spinner-border spinner-border-sm me-2"></div>Đang tính firing strengths...</div>';

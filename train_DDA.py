@@ -89,6 +89,7 @@ if __name__ == '__main__':
 
     Metric = ('Epoch\t\tTime\t\tAUC\t\tAUPR\t\tAccuracy\t\tPrecision\t\tRecall\t\tF1-score\t\tMcc')
     AUCs, AUPRs = [], []
+    fold_results = []   # collect per-fold best metrics for CSV
 
     print('Dataset:', args.dataset)
 
@@ -160,6 +161,17 @@ if __name__ == '__main__':
 
         AUCs.append(best_auc)
         AUPRs.append(best_aupr)
+        fold_results.append({
+            'Fold':      i,
+            'Best_Epoch': best_epoch if 'best_epoch' in dir() else 0,
+            'AUC':       best_auc,
+            'AUPR':      best_aupr,
+            'Accuracy':  best_accuracy,
+            'Precision': best_precision,
+            'Recall':    best_recall,
+            'F1-score':  best_f1,
+            'Mcc':       best_mcc,
+        })
 
     print('AUC:', AUCs)
     AUC_mean = np.mean(AUCs)
@@ -170,6 +182,33 @@ if __name__ == '__main__':
     AUPR_mean = np.mean(AUPRs)
     AUPR_std = np.std(AUPRs)
     print('Mean AUPR:', AUPR_mean, '(', AUPR_std, ')')
+
+    # ── Save 10-fold results CSV (like AMDGT format) ──────────────────────
+    import pandas as pd
+    from datetime import datetime
+    df = pd.DataFrame(fold_results)
+    mean_row = {'Fold': 'Mean', 'Best_Epoch': '',
+                'AUC':       df['AUC'].mean(),
+                'AUPR':      df['AUPR'].mean(),
+                'Accuracy':  df['Accuracy'].mean(),
+                'Precision': df['Precision'].mean(),
+                'Recall':    df['Recall'].mean(),
+                'F1-score':  df['F1-score'].mean(),
+                'Mcc':       df['Mcc'].mean()}
+    std_row  = {'Fold': 'Std',  'Best_Epoch': '',
+                'AUC':       df['AUC'].std(),
+                'AUPR':      df['AUPR'].std(),
+                'Accuracy':  df['Accuracy'].std(),
+                'Precision': df['Precision'].std(),
+                'Recall':    df['Recall'].std(),
+                'F1-score':  df['F1-score'].std(),
+                'Mcc':       df['Mcc'].std()}
+    df = pd.concat([df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
+    os.makedirs(args.result_dir, exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    csv_path = os.path.join(args.result_dir, f'10_fold_results_{timestamp}.csv')
+    df.to_csv(csv_path, index=False)
+    print(f'Results saved to: {csv_path}')
 
 
 

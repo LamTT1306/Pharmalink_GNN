@@ -104,9 +104,20 @@ class LearnableFuzzyLayer(nn.Module):
         Return normalised firing strengths without gradient tracking.
         Used by the web app for per-rule visualisation.
         Shape: (B, n_rules)
+
+        NOTE: Product T-norm across many features collapses to ~0 numerically.
+        When that happens, fall back to softmax of mean squared distances
+        so the visualisation always shows meaningful relative activations.
         """
         with torch.no_grad():
-            return self._firing_strengths(x).cpu()
+            raw = self._firing_strengths(x).cpu()
+            # If product T-norm collapsed (all values negligible), use mean-distance fallback
+            if raw.max() < 1e-6:
+                diff   = x.unsqueeze(1) - self.centers.unsqueeze(0)          # (B, R, F)
+                sigma  = torch.exp(self.log_sigmas).unsqueeze(0) + 1e-6      # (1, R, F)
+                mean_sq = ((diff / sigma).pow(2)).mean(dim=-1)                # (B, R)
+                raw = torch.softmax(-mean_sq, dim=-1).cpu()
+            return raw
 
 
 # ════════════════════════════════════════════════════════════════
@@ -209,14 +220,21 @@ class AMNTDDA_Fuzzy(nn.Module):
         di_hgt = hgt_out[self.args.drug_number:
                          self.args.disease_number + self.args.drug_number, :]
 
-        # TransformerEncoder fusion
-        dr = self.drug_trans(torch.stack((dr_sim, dr_hgt), dim=1))
-        di = self.disease_trans(torch.stack((di_sim, di_hgt), dim=1))
-        dr = dr.view(self.args.drug_number,    2 * self.args.gt_out_dim)
-        di = di.view(self.args.disease_number, 2 * self.args.gt_out_dim)
+        # Self-fusion: TransformerEncoder combines similarity + network features
+        dr_seq = self.drug_trans(torch.stack((dr_sim, dr_hgt), dim=1))    # (N_drug, 2, d)
+        di_seq = self.disease_trans(torch.stack((di_sim, di_hgt), dim=1)) # (N_disease, 2, d)
+
+        # Cross-modal attention (Module 3): drug queries disease context and vice versa
+        dr_pairs = dr_seq[sample[:, 0]]                                    # (B, 2, d)
+        di_pairs = di_seq[sample[:, 1]]                                    # (B, 2, d)
+        dr_refined = self.drug_tr(src=di_pairs, tgt=dr_pairs)             # (B, 2, d)
+        di_refined = self.disease_tr(src=dr_pairs, tgt=di_pairs)          # (B, 2, d)
 
         # Element-wise interaction vector
-        interact = torch.mul(dr[sample[:, 0]], di[sample[:, 1]])    # (B, 400)
+        interact = torch.mul(
+            dr_refined.reshape(dr_pairs.shape[0], 2 * self.args.gt_out_dim),  # (B, 400)
+            di_refined.reshape(di_pairs.shape[0], 2 * self.args.gt_out_dim),  # (B, 400)
+        )                                                                       # (B, 400)
 
         # Fuzzy layer
         fuzzy_out = self.fuzzy_layer(interact)                      # (B, 256)
@@ -224,7 +242,7 @@ class AMNTDDA_Fuzzy(nn.Module):
         # Classifier
         output = self.mlp(torch.cat([fuzzy_out, interact], dim=-1)) # (B, 2)
 
-        return dr, output
+        return dr_seq.view(self.args.drug_number, 2 * self.args.gt_out_dim), output
 
     # ── Interpretability ─────────────────────────────────────────
 
@@ -255,10 +273,16 @@ class AMNTDDA_Fuzzy(nn.Module):
             di_hgt = hgt_out[self.args.drug_number:
                              self.args.disease_number + self.args.drug_number, :]
 
-            dr = self.drug_trans(torch.stack((dr_sim, dr_hgt), dim=1))
-            di = self.disease_trans(torch.stack((di_sim, di_hgt), dim=1))
-            dr = dr.view(self.args.drug_number,    2 * self.args.gt_out_dim)
-            di = di.view(self.args.disease_number, 2 * self.args.gt_out_dim)
+            dr_seq = self.drug_trans(torch.stack((dr_sim, dr_hgt), dim=1))
+            di_seq = self.disease_trans(torch.stack((di_sim, di_hgt), dim=1))
 
-            interact = torch.mul(dr[sample[:, 0]], di[sample[:, 1]])
+            dr_pairs = dr_seq[sample[:, 0]]
+            di_pairs = di_seq[sample[:, 1]]
+            dr_refined = self.drug_tr(src=di_pairs, tgt=dr_pairs)
+            di_refined = self.disease_tr(src=dr_pairs, tgt=di_pairs)
+
+            interact = torch.mul(
+                dr_refined.reshape(dr_pairs.shape[0], 2 * self.args.gt_out_dim),
+                di_refined.reshape(di_pairs.shape[0], 2 * self.args.gt_out_dim),
+            )
             return self.fuzzy_layer.firing_strengths(interact)

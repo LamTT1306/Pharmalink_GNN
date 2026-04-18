@@ -3,16 +3,18 @@ import torch
 import torch.nn as nn
 from model import gt_net_drug, gt_net_disease
 
+device = torch.device('cuda')
+
+
 class AMNTDDA(nn.Module):
     def __init__(self, args):
         super(AMNTDDA, self).__init__()
         self.args = args
-        _device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.drug_linear = nn.Linear(300, args.hgt_in_dim)
         self.protein_linear = nn.Linear(320, args.hgt_in_dim)
-        self.gt_drug = gt_net_drug.GraphTransformer(_device, args.gt_layer, args.drug_number, args.gt_out_dim, args.gt_out_dim,
+        self.gt_drug = gt_net_drug.GraphTransformer(device, args.gt_layer, args.drug_number, args.gt_out_dim, args.gt_out_dim,
                                                     args.gt_head, args.dropout)
-        self.gt_disease = gt_net_disease.GraphTransformer(_device, args.gt_layer, args.disease_number, args.gt_out_dim,
+        self.gt_disease = gt_net_disease.GraphTransformer(device, args.gt_layer, args.disease_number, args.gt_out_dim,
                                                     args.gt_out_dim, args.gt_head, args.dropout)
 
         self.hgt_dgl = dgl.nn.pytorch.conv.HGTConv(args.hgt_in_dim, int(args.hgt_in_dim/args.hgt_head), args.hgt_head, 3, 3, args.dropout)
