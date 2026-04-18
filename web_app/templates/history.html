@@ -31,7 +31,7 @@
           <th style="padding:.9rem 1.2rem;color:#94a3b8;font-size:.72rem;letter-spacing:.7px;text-transform:uppercase;font-weight:600;border:none">Loại</th>
           <th style="padding:.9rem 1.2rem;color:#94a3b8;font-size:.72rem;letter-spacing:.7px;text-transform:uppercase;font-weight:600;border:none">Top-K</th>
           <th style="padding:.9rem 1.2rem;color:#94a3b8;font-size:.72rem;letter-spacing:.7px;text-transform:uppercase;font-weight:600;border:none">Mô hình</th>
-          <th style="padding:.9rem 1.2rem;color:#94a3b8;font-size:.72rem;letter-spacing:.7px;text-transform:uppercase;font-weight:600;border:none">Th�?i gian</th>
+          <th style="padding:.9rem 1.2rem;color:#94a3b8;font-size:.72rem;letter-spacing:.7px;text-transform:uppercase;font-weight:600;border:none">Thời gian</th>
           <th style="padding:.9rem 1.2rem;border:none"></th>
         </tr>
       </thead>
@@ -137,8 +137,8 @@ async function viewDetail(id) {
   document.getElementById('modal-title').innerHTML = `<i class="bi bi-list-ul me-2" style="color:#60a5fa"></i>${data.query_name} – Top ${data.top_k}`;
   const isDrug = data.query_type === 'drug';
   const header = isDrug
-    ? '<th>#</th><th>Tên bệnh</th><th>Mã OMIM</th><th>�?iểm</th><th>Trạng thái</th>'
-    : '<th>#</th><th>Tên thuốc</th><th>Mã thuốc</th><th>�?iểm</th><th>Trạng thái</th>';
+    ? '<th>#</th><th>Tên bệnh</th><th>Mã OMIM</th><th>Điểm</th><th>Trạng thái</th>'
+    : '<th>#</th><th>Tên thuốc</th><th>Mã thuốc</th><th>Điểm</th><th>Trạng thái</th>';
 
   const rows = data.results.map(r => {
     const name  = isDrug ? r.disease_name : r.drug_name;
@@ -146,7 +146,7 @@ async function viewDetail(id) {
     const pct   = Math.round(r.score * 100);
     const clr   = pct >= 70 ? '#10b981' : pct >= 40 ? '#f59e0b' : '#ef4444';
     const badge = r.is_known
-      ? '<span class="badge" style="background:linear-gradient(135deg,#10b981,#059669);color:#fff;font-size:.7rem">�?ã biết</span>'
+      ? '<span class="badge" style="background:linear-gradient(135deg,#10b981,#059669);color:#fff;font-size:.7rem">Đã biết</span>'
       : '<span class="badge" style="background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;font-size:.7rem">Dự đoán</span>';
     return `<tr>
       <td style="padding:.7rem .9rem;color:#64748b">${r.rank}</td>

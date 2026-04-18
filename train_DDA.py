@@ -106,6 +106,7 @@ if __name__ == '__main__':
         optimizer = optim.Adam(model.parameters(), weight_decay=args.weight_decay, lr=args.lr)
 
         best_auc, best_aupr, best_accuracy, best_precision, best_recall, best_f1, best_mcc = 0, 0, 0, 0, 0, 0, 0
+        best_epoch = 0
         X_train = torch.LongTensor(data['X_train'][i]).to(device)
         Y_train = torch.LongTensor(data['Y_train'][i]).to(device)
         X_test = torch.LongTensor(data['X_test'][i]).to(device)
@@ -163,7 +164,7 @@ if __name__ == '__main__':
         AUPRs.append(best_aupr)
         fold_results.append({
             'Fold':      i,
-            'Best_Epoch': best_epoch if 'best_epoch' in dir() else 0,
+            'Best_Epoch': best_epoch,
             'AUC':       best_auc,
             'AUPR':      best_aupr,
             'Accuracy':  best_accuracy,
