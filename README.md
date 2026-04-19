@@ -4,7 +4,7 @@ Hệ thống dự đoán liên kết thuốc-bệnh sử dụng Graph Neural Net
 
 ## Yêu cầu môi trường
 
-| Package | Version đã test |
+| Package | Version |
 |---|---|
 | Python | 3.9+ |
 | PyTorch | 2.3.0+cu121 |

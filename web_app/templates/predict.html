@@ -55,23 +55,10 @@
       </ul>
     </div>
     <span id="dataset-badge" style="display:inline-flex;gap:4px;flex-shrink:0"></span>
-    <!-- Gemini AI button -->
-    <div class="dropdown ms-2">
-      <button class="btn btn-sm dropdown-toggle" type="button"
-              id="ai-key-btn" data-bs-toggle="dropdown" aria-expanded="false"
-              style="background:linear-gradient(135deg,#a855f7,#6366f1);color:#fff;border:none">
-        <i class="bi bi-stars me-1"></i><span id="ai-status-txt">AI</span>
-      </button>
-      <div class="dropdown-menu p-3 shadow" style="min-width:320px" id="ai-key-menu">
-        <h6 class="fw-bold mb-1"><i class="bi bi-key me-1"></i>Gemini API Key</h6>
-        <p class="small text-muted mb-2">Lấy miễn phí tại <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a></p>
-        <div class="input-group input-group-sm">
-          <input type="password" id="gemini-key-input" class="form-control" placeholder="AIza...">
-          <button class="btn btn-primary" onclick="saveGeminiKey()"><i class="bi bi-check-lg"></i></button>
-        </div>
-        <div id="ai-key-status" class="small mt-2"></div>
-      </div>
-    </div>
+    <!-- Hidden Gemini key inputs (still functional, just not shown as top-nav button) -->
+    <input type="hidden" id="gemini-key-input">
+    <span id="ai-status-txt" class="d-none"></span>
+    <span id="ai-key-status" class="d-none"></span>
   </div>
 </div>
 
@@ -288,14 +275,11 @@
               <div class="small text-muted mt-1" id="results-meta"></div>
             </div>
             <div class="d-flex gap-2">
-              <button class="btn btn-sm btn-outline-info" onclick="showFuzzyPanel()">
+              <button id="btn-fuzzy-panel" class="btn btn-sm btn-outline-info" onclick="showFuzzyPanel()">
                 <i class="bi bi-bezier2 me-1"></i>Phân tích Fuzzy
               </button>
               <button class="btn btn-sm btn-outline-primary d-none" id="btn-fuzzy-layer" onclick="showFuzzyLayerPanel()">
                 <i class="bi bi-grid-3x3 me-1"></i>Firing Strengths
-              </button>
-              <button class="btn btn-sm btn-outline-warning" id="ai-explain-btn" onclick="aiExplainSingle()" style="display:none">
-                <i class="bi bi-stars me-1"></i>AI Giải thích
               </button>
               <button class="btn btn-sm btn-outline-secondary" onclick="exportResults()">
                 <i class="bi bi-download me-1"></i>Xuất CSV
@@ -1106,10 +1090,16 @@ function renderSingleResults(data) {
       </td>
       <td>${r.is_known ? '<span class="badge" style="background:#d1fae5;color:#065f46">✓ Đã biết</span>' : '<span class="badge bg-light text-muted">Dự đoán</span>'}</td>
       <td>
-        ${(query_type === 'drug' && !sub_type && idxVal !== undefined && model !== 'gnn') ?
-          `<button class="btn btn-xs btn-outline-warning py-0 px-2" style="font-size:.7rem"
-            onclick="openFuzzyModal(${state.selectedDrugIdx},${idxVal})">
-            <i class="bi bi-bezier2 me-1"></i>Fuzzy</button>` : ''}
+        ${(!sub_type && idxVal !== undefined && model !== 'gnn') ? (() => {
+          const [dIdx, disIdx] = isDrugDisease
+            ? [state.selectedDrugIdx, idxVal]
+            : (isDiseaseDrug ? [idxVal, state.selectedDiseaseIdx] : [null, null]);
+          return (dIdx !== null && disIdx !== null)
+            ? `<button class="btn btn-xs btn-outline-warning py-0 px-2" style="font-size:.7rem"
+                onclick="openFuzzyModal(${dIdx},${disIdx})">
+                <i class="bi bi-bezier2 me-1"></i>Fuzzy</button>`
+            : '';
+        })() : ''}
       </td>
     </tr>`;
   });
@@ -1123,23 +1113,65 @@ function renderSingleResults(data) {
       score:        top.score || 0,
       is_known:     top.is_known || false,
     };
-    document.getElementById('ai-explain-btn').style.display = '';
+    // ai-explain-btn removed
   }
 }
 
-// -- Fuzzy panel (inline)
+// -- Fuzzy panel (inline) — shows a selector so user can pick any result row
 async function showFuzzyPanel() {
-  if (!state.currentResults || state.currentResults.query_type !== 'drug') {
+  const cr = state.currentResults;
+  if (!cr || (cr.query_type !== 'drug' && cr.query_type !== 'disease') || cr.sub_type === 'protein') {
     showToast('Chọn kết quả Thuốc–Bệnh để xem Fuzzy', 'info'); return;
   }
   const panel = document.getElementById('fuzzy-panel');
   panel.classList.remove('d-none');
-  document.getElementById('fuzzy-loading').classList.remove('d-none');
-  document.getElementById('fuzzy-content').classList.add('d-none');
 
-  const top = state.currentResults.results[0];
-  if (!top) return;
-  await loadFuzzyContent(state.selectedDrugIdx, top.disease_idx, 'fuzzy-content', 'fuzzy-loading');
+  const results = cr.results || [];
+  if (!results.length) return;
+
+  // Build a selector if more than 1 result
+  const selectorId = 'fuzzy-panel-selector';
+  let selectorHTML = '';
+  if (results.length > 1) {
+    const opts = results.map((r, i) => {
+      const label = r.disease_name || r.drug_name || `#${i+1}`;
+      return `<option value="${i}">${i+1}. ${label} (${r.score.toFixed(4)})</option>`;
+    }).join('');
+    selectorHTML = `<div class="mb-2 d-flex align-items-center gap-2">
+      <label class="small fw-semibold text-muted mb-0">Chọn kết quả:</label>
+      <select id="${selectorId}" class="form-select form-select-sm" style="max-width:280px"
+              onchange="_loadFuzzyForSelected()">${opts}</select>
+    </div>`;
+  }
+
+  document.getElementById('fuzzy-content').innerHTML = selectorHTML;
+  document.getElementById('fuzzy-content').classList.remove('d-none');
+  document.getElementById('fuzzy-loading').classList.remove('d-none');
+
+  await _loadFuzzyForSelected();
+}
+
+async function _loadFuzzyForSelected() {
+  const cr = state.currentResults;
+  if (!cr) return;
+  const sel = document.getElementById('fuzzy-panel-selector');
+  const idx = sel ? parseInt(sel.value) : 0;
+  const r = (cr.results || [])[idx];
+  if (!r) return;
+
+  const drugIdx    = cr.query_type === 'drug'    ? state.selectedDrugIdx    : (r.drug_idx ?? r.idx);
+  const diseaseIdx = cr.query_type === 'disease' ? state.selectedDiseaseIdx : (r.disease_idx ?? r.idx);
+
+  document.getElementById('fuzzy-loading').classList.remove('d-none');
+  // Keep selector visible — only replace content below it
+  const existing = document.getElementById('fuzzy-inline-result');
+  if (existing) existing.remove();
+
+  const tmp = document.createElement('div');
+  tmp.id = 'fuzzy-inline-result';
+  document.getElementById('fuzzy-content').appendChild(tmp);
+
+  await loadFuzzyContent(drugIdx, diseaseIdx, 'fuzzy-inline-result', 'fuzzy-loading');
 }
 
 async function openFuzzyModal(drugIdx, diseaseIdx) {
@@ -1167,10 +1199,16 @@ async function loadFuzzyContent(drugIdx, diseaseIdx, contentId, loadingId) {
     });
     const d = await res.json();
     document.getElementById(loadingId).classList.add('d-none');
-    document.getElementById(contentId).innerHTML = buildFuzzyHTML(d, false);
+    if (d.error) {
+      document.getElementById(contentId).innerHTML = `<div class="alert alert-danger small">${d.error}</div>`;
+    } else {
+      document.getElementById(contentId).innerHTML = buildFuzzyHTML(d, false);
+    }
     document.getElementById(contentId).classList.remove('d-none');
   } catch(e) {
-    document.getElementById(loadingId).innerHTML = '<span class="text-danger">Lỗi tải Fuzzy</span>';
+    document.getElementById(loadingId).classList.add('d-none');
+    document.getElementById(contentId).innerHTML = '<div class="alert alert-danger small">Lỗi tải Fuzzy</div>';
+    document.getElementById(contentId).classList.remove('d-none');
   }
 }
 
@@ -2111,6 +2149,14 @@ async function show3DMolecule(smiles, name) {
       // Show firing-strengths button only for gnn_fuzzy
       const btnFL = document.getElementById('btn-fuzzy-layer');
       if (btnFL) btnFL.classList.toggle('d-none', modelSel.value !== 'gnn_fuzzy');
+      // Hide Fuzzy panel button when using pure GNN (Mamdani FIS not relevant for GNN)
+      const btnFP = document.getElementById('btn-fuzzy-panel');
+      if (btnFP) btnFP.classList.toggle('d-none', modelSel.value === 'gnn');
+      // Hide inline fuzzy panel when switching to GNN
+      if (modelSel.value === 'gnn') {
+        const fuzzyPanel = document.getElementById('fuzzy-panel');
+        if (fuzzyPanel) fuzzyPanel.classList.add('d-none');
+      }
     });
   }
 
@@ -2319,6 +2365,11 @@ async function showFuzzyLayerPanel() {
   panel.classList.remove('d-none');
   panel.scrollIntoView({behavior:'smooth', block:'nearest'});
 
+  // Start a demo animation immediately so canvas is never blank while loading
+  const demoS = Array.from({length: 32}, (_, i) =>
+    Math.max(0.05, Math.exp(-((i - 8) * (i - 8)) / 22) * 0.9 + (Math.random() * 0.12)));
+  startFuzzyAnimation(demoS);
+
   // Determine drug/disease pair from current prediction results
   const data = state.currentResults;
   const results = data?.results;
@@ -2419,6 +2470,10 @@ function startFuzzyAnimation(strengths) {
   const ctx = canvas.getContext('2d');
   const W = canvas.width, H = canvas.height;
 
+  // Normalize strengths for VISUAL purposes so max = 1.0 (curves always visible)
+  const maxS = Math.max(...strengths, 1e-6);
+  const norm = strengths.map(s => s / maxS);
+
   // Simple Perlin-like noise
   function fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
   function lerp(a, b, t) { return a + t * (b - a); }
@@ -2430,9 +2485,9 @@ function startFuzzyAnimation(strengths) {
     return lerp(a - Math.floor(a), b - Math.floor(b), fade(xf));
   }
 
-  const N = Math.min(strengths.length, 16);  // draw up to 16 curves
-  const sorted = [...strengths.keys()]
-    .sort((a, b) => strengths[b] - strengths[a])
+  const N = Math.min(norm.length, 16);  // draw up to 16 curves
+  const sorted = [...norm.keys()]
+    .sort((a, b) => norm[b] - norm[a])
     .slice(0, N);
 
   function frame(ts) {
@@ -2452,36 +2507,36 @@ function startFuzzyAnimation(strengths) {
     for (let x = 0; x <= W; x += W/8) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
 
     // Draw Gaussian membership function curves for each top rule
-    sorted.forEach((ruleIdx, i) => {
-      const strength = strengths[ruleIdx];
-      if (strength < 1e-6) return;
+    sorted.forEach((ruleIdx) => {
+      const ns = norm[ruleIdx];          // normalized strength (0-1)
+      const rs = strengths[ruleIdx];     // real strength (for color/alpha)
+      if (ns < 0.01) return;
 
       // Centre of this rule's Gaussian (distribute evenly across canvas)
-      const cx_norm = (ruleIdx + 0.5) / strengths.length;
-      const cx = cx_norm * W;
-      // Width: inversely proportional to rule index for visual variety
-      const sigma = (0.05 + 0.08 * (1 - strength)) * W;
+      const cx = ((ruleIdx + 0.5) / norm.length) * W;
+      // Width based on normalized strength
+      const sigma = (0.04 + 0.07 * (1 - ns)) * W;
 
       // Hue: blue (strong) → cyan → green (weak)
-      const hue = Math.round(200 + (1 - strength) * 80);
-      const alpha = 0.15 + strength * 0.65;
+      const hue = Math.round(200 + (1 - ns) * 100);
+      const alpha = 0.3 + ns * 0.7;
 
       // Noise offset for "fuzzy/noisy" effect
-      const noiseOffset = noise1d(_fuzzyAnimTime + ruleIdx * 0.37) * 15;
+      const noiseOffset = noise1d(_fuzzyAnimTime + ruleIdx * 0.37) * 18;
 
       ctx.beginPath();
       for (let px = 0; px <= W; px += 2) {
         const d   = px - cx + noiseOffset;
         const val = Math.exp(-(d * d) / (2 * sigma * sigma));
-        // Add Perlin noise to the curve height
-        const nv  = noise1d(_fuzzyAnimTime * 2 + px * 0.02 + ruleIdx) * 0.08;
-        const y   = H - (val + nv) * strength * (H * 0.75);
+        // Perlin noise adds turbulence
+        const nv  = noise1d(_fuzzyAnimTime * 2 + px * 0.02 + ruleIdx) * 0.12;
+        const y   = H - (val + nv) * ns * (H * 0.82);
         px === 0 ? ctx.moveTo(px, y) : ctx.lineTo(px, y);
       }
       ctx.strokeStyle = `hsla(${hue},90%,65%,${alpha})`;
-      ctx.lineWidth   = 1 + strength * 2.5;
-      ctx.shadowColor = `hsla(${hue},100%,70%,0.5)`;
-      ctx.shadowBlur  = 8 * strength;
+      ctx.lineWidth   = 1.5 + ns * 3;
+      ctx.shadowColor = `hsla(${hue},100%,70%,0.6)`;
+      ctx.shadowBlur  = 10 + ns * 12;
       ctx.stroke();
       ctx.shadowBlur  = 0;
     });
@@ -2494,9 +2549,9 @@ function startFuzzyAnimation(strengths) {
     ctx.fillStyle = scanGrad;
     ctx.fillRect(scanX - 20, 0, 22, H);
 
-    // "FUZZY ACTIVE" watermark
+    // Watermark
     ctx.font = '10px monospace';
-    ctx.fillStyle = 'rgba(148,163,184,.2)';
+    ctx.fillStyle = 'rgba(148,163,184,.25)';
     ctx.fillText(`RULES: ${strengths.length}  |  ACTIVE: ${sorted.length}  |  T=${_fuzzyAnimTime.toFixed(2)}`, 8, H - 8);
 
     _fuzzyAnimFrame = requestAnimationFrame(frame);

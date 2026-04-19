@@ -62,13 +62,25 @@ class _EngineProxy:
 
 
 engine = _EngineProxy()
-_load_engine('C-dataset')  # pre-load default at startup
-
-# Auto-configure Gemini if env var is set
-_gemini_key_env = os.environ.get('GEMINI_API_KEY', '')
-if _gemini_key_env:
+for _ds in AVAILABLE_DATASETS:  # pre-load all datasets at startup
     try:
-        gemini_client.configure(_gemini_key_env)
+        _load_engine(_ds)
+    except Exception as _pre_e:
+        print(f'  ⚠ Không tải được {_ds}: {_pre_e}')
+
+# Auto-configure Gemini from env var or persisted file
+_gemini_key_env = os.environ.get('GEMINI_API_KEY', '')
+_gemini_key_file = os.path.join(BASE_DIR, '.gemini_key')
+_gemini_boot_key = _gemini_key_env
+if not _gemini_boot_key and os.path.exists(_gemini_key_file):
+    try:
+        with open(_gemini_key_file, 'r', encoding='utf-8') as _f:
+            _gemini_boot_key = _f.read().strip()
+    except Exception:
+        pass
+if _gemini_boot_key:
+    try:
+        gemini_client.configure(_gemini_boot_key)
         print('  ✓ Gemini AI đã sẵn sàng')
     except Exception as _e:
         print(f'  ⚠ Gemini không khởi động được: {_e}')
@@ -87,7 +99,8 @@ if _replicate_key_env:
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if 'user_id' not in session:
+        if 'user_id' not in session or g.user is None:
+            session.clear()
             flash('Vui lòng đăng nhập để tiếp tục.', 'warning')
             return redirect(url_for('login'))
         return f(*args, **kwargs)
@@ -170,21 +183,31 @@ def logout():
 
 # ─── User Routes ──────────────────────────────────────────────
 @app.route('/')
+def index():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    return redirect(url_for('dashboard'))
+
+@app.route('/dashboard')
 @login_required
 def dashboard():
-    info = engine.get_dataset_info()
-    stats = {
-        'n_drugs':        info['n_drugs'],
-        'n_diseases':     info['n_diseases'],
-        'n_proteins':     info['n_proteins'],
-        'n_associations': info['n_associations'],
-        'n_drpr':         info['n_drpr'],
-        'n_dipr':         info['n_dipr'],
-        'n_predictions':  db.count_predictions(),
-        'models_available': info['models_available'],
-        'gnn_ready':      info['gnn_ready'],
-        'gnn_auc':        info['gnn_auc'],
-    }
+    # Aggregate counts across ALL datasets
+    agg = {'n_drugs': 0, 'n_diseases': 0, 'n_proteins': 0,
+           'n_associations': 0, 'n_drpr': 0, 'n_dipr': 0}
+    for ds in AVAILABLE_DATASETS:
+        try:
+            ds_info = _load_engine(ds).get_dataset_info()
+            for k in agg:
+                agg[k] += ds_info[k]
+        except Exception:
+            pass
+    # Model availability from current session's dataset
+    cur_info = engine.get_dataset_info()
+    stats = {**agg,
+             'n_predictions':    db.count_predictions(),
+             'models_available': cur_info['models_available'],
+             'gnn_ready':        cur_info['gnn_ready'],
+             'gnn_auc':          cur_info['gnn_auc']}
     recent, _ = db.get_user_predictions(session['user_id'], page=1, per_page=5)
     return render_template('dashboard.html', stats=stats, recent=recent)
 
@@ -357,7 +380,11 @@ def api_fuzzy_explain():
     disease_idx = data.get('disease_idx')
     if drug_idx is None or disease_idx is None:
         return jsonify({'error': 'Thiếu tham số'}), 400
-    result = engine.fuzzy_explain(int(drug_idx), int(disease_idx))
+    try:
+        result = engine.fuzzy_explain(int(drug_idx), int(disease_idx))
+    except Exception as e:
+        app.logger.exception('fuzzy_explain error')
+        return jsonify({'error': f'Lỗi tính toán: {str(e)}'}), 500
     if not result:
         return jsonify({'error': 'Index không hợp lệ'}), 404
     return jsonify(result)
@@ -571,8 +598,14 @@ def api_ai_configure():
         return jsonify({'error': 'Thiếu API key'}), 400
     try:
         gemini_client.configure(key)
-        # Persist in session (not stored permanently for security)
         session['gemini_key'] = key
+        # Persist to file so it survives server restarts
+        _key_path = os.path.join(BASE_DIR, '.gemini_key')
+        try:
+            with open(_key_path, 'w', encoding='utf-8') as _f:
+                _f.write(key)
+        except Exception:
+            pass
         return jsonify({'ok': True, 'ready': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -605,9 +638,17 @@ def api_replicate_status():
 @app.route('/api/ai/status')
 @login_required
 def api_ai_status():
-    # Restore from session if available
     if not gemini_client.is_ready():
+        # Try session first, then persisted file
         key = session.get('gemini_key', '')
+        if not key:
+            _kp = os.path.join(BASE_DIR, '.gemini_key')
+            if os.path.exists(_kp):
+                try:
+                    with open(_kp, 'r', encoding='utf-8') as _f:
+                        key = _f.read().strip()
+                except Exception:
+                    pass
         if key:
             try:
                 gemini_client.configure(key)

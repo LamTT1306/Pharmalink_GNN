@@ -380,26 +380,38 @@ class PredictionEngine:
             if r[0] < self.n_diseases and r[1] < self.n_proteins:
                 self.dipr_adj[r[0], r[1]] = 1.0
 
-        # Drug similarity (clip to n_drugs to guard against CSV size mismatch)
+        # Drug similarity — always produce a square (n_drugs × n_drugs) matrix
         drf = pd.read_csv(os.path.join(d, 'DrugFingerprint.csv')).iloc[:, 1:].to_numpy()
         drg = pd.read_csv(os.path.join(d, 'DrugGIP.csv')).iloc[:, 1:].to_numpy()
         nd = self.n_drugs
-        drf = drf[:nd, :nd] if drf.shape[0] >= nd and drf.shape[1] >= nd else drf
-        drg = drg[:nd, :nd] if drg.shape[0] >= nd and drg.shape[1] >= nd else drg
-        # Align shapes before element-wise ops
-        min_r = min(drf.shape[0], drg.shape[0], nd)
-        min_c = min(drf.shape[1], drg.shape[1], nd)
+        # Clip to at most nd rows/cols
+        drf = drf[:nd, :nd] if drf.shape[0] >= nd and drf.shape[1] >= nd else drf[:min(drf.shape[0], nd), :min(drf.shape[1], nd)]
+        drg = drg[:nd, :nd] if drg.shape[0] >= nd and drg.shape[1] >= nd else drg[:min(drg.shape[0], nd), :min(drg.shape[1], nd)]
+        min_r = min(drf.shape[0], drg.shape[0])
+        min_c = min(drf.shape[1], drg.shape[1])
         drf = drf[:min_r, :min_c]; drg = drg[:min_r, :min_c]
-        self.drug_sim = np.where(drf == 0, drg, (drf + drg) / 2).astype(np.float32)
+        raw_sim = np.where(drf == 0, drg, (drf + drg) / 2).astype(np.float32)
+        # Pad to (nd, nd) so drug_sim @ adj (shape nd×n_diseases) always works
+        drug_sim = np.zeros((nd, nd), dtype=np.float32)
+        drug_sim[:raw_sim.shape[0], :raw_sim.shape[1]] = raw_sim
+        # Symmetrise: fill lower-left if upper-right was populated but not vice-versa
+        drug_sim = np.maximum(drug_sim, drug_sim.T)
+        self.drug_sim = drug_sim
 
-        # Disease similarity (clip to n_diseases)
+        # Disease similarity — always produce a square (n_diseases × n_diseases) matrix
         dip = pd.read_csv(os.path.join(d, 'DiseasePS.csv')).iloc[:, 1:].to_numpy()
         dig = pd.read_csv(os.path.join(d, 'DiseaseGIP.csv')).iloc[:, 1:].to_numpy()
         ndi = self.n_diseases
-        min_r2 = min(dip.shape[0], dig.shape[0], ndi)
-        min_c2 = min(dip.shape[1], dig.shape[1], ndi)
+        dip = dip[:ndi, :ndi] if dip.shape[0] >= ndi and dip.shape[1] >= ndi else dip[:min(dip.shape[0], ndi), :min(dip.shape[1], ndi)]
+        dig = dig[:ndi, :ndi] if dig.shape[0] >= ndi and dig.shape[1] >= ndi else dig[:min(dig.shape[0], ndi), :min(dig.shape[1], ndi)]
+        min_r2 = min(dip.shape[0], dig.shape[0])
+        min_c2 = min(dip.shape[1], dig.shape[1])
         dip = dip[:min_r2, :min_c2]; dig = dig[:min_r2, :min_c2]
-        self.disease_sim = np.where(dip == 0, dig, (dip + dig) / 2).astype(np.float32)
+        raw_dis = np.where(dip == 0, dig, (dip + dig) / 2).astype(np.float32)
+        disease_sim = np.zeros((ndi, ndi), dtype=np.float32)
+        disease_sim[:raw_dis.shape[0], :raw_dis.shape[1]] = raw_dis
+        disease_sim = np.maximum(disease_sim, disease_sim.T)
+        self.disease_sim = disease_sim
 
     # ── CF score matrices (lazy, cached) ─────────────────────
     def _cf_drug_disease(self):
