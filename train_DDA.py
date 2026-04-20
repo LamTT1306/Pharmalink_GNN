@@ -44,6 +44,10 @@ if __name__ == '__main__':
                         help='number of TSK fuzzy rules in LearnableFuzzyLayer')
     parser.add_argument('--fuzzy_dim', type=int, default=256,
                         help='output dimension of LearnableFuzzyLayer')
+    parser.add_argument('--fuzzy_proj_dim', type=int, default=64,
+                        help='projection dim inside LearnableFuzzyLayer (prevents T-norm collapse)')
+    parser.add_argument('--label_smoothing', type=float, default=0.0,
+                        help='label smoothing for CrossEntropyLoss (e.g. 0.05 for gnn_fuzzy)')
 
     args = parser.parse_args()
     args.data_dir = 'data/' + args.dataset + '/'
@@ -85,7 +89,8 @@ if __name__ == '__main__':
 
     start = timeit.default_timer()
 
-    cross_entropy = nn.CrossEntropyLoss()
+    cross_entropy = nn.CrossEntropyLoss(
+        label_smoothing=getattr(args, 'label_smoothing', 0.0))
 
     Metric = ('Epoch\t\tTime\t\tAUC\t\tAUPR\t\tAccuracy\t\tPrecision\t\tRecall\t\tF1-score\t\tMcc')
     AUCs, AUPRs = [], []

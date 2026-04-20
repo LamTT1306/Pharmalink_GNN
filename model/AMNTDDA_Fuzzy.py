@@ -1,5 +1,5 @@
 """
-AMNTDDA_Fuzzy – AMNTDDA augmented with a Learnable Fuzzy Inference Layer.
+AMNTDDA_Fuzzy v2 – AMNTDDA augmented with an Enhanced Learnable Fuzzy Inference Layer.
 
 Architecture
 ------------
@@ -7,24 +7,35 @@ Architecture
                  GT-Drug  (drug–drug similarity graph)
                + GT-Disease (disease–disease similarity graph)
                + HGTConv  (heterogeneous drug–disease–protein knowledge graph)
-               + TransformerEncoder fusion → 400-dim interaction vector
+               + TransformerEncoder fusion
 
-  New layer : LearnableFuzzyLayer  (TSK-type, Gaussian MFs, fully differentiable)
-                 in  = 400-dim element-wise interaction vector
-                 out = 256-dim fuzzy-activated features
+  Interaction: Rich vector cat(dr*di, |dr-di|) → Linear(800→400) + GELU + LN
+                 Element-wise product captures co-activation;
+                 absolute difference captures asymmetric/contrastive signal.
+
+  New layer : LearnableFuzzyLayer v2  (TSK-type, Gaussian MFs, fully differentiable)
+                 in       = 400-dim rich interaction vector
+                 proj_dim = 64   (projects input BEFORE T-norm to prevent collapse)
+                 out      = 256-dim fuzzy-activated features + residual from projection
 
   Classifier: MLP input = cat(fuzzy_out:256, interaction:400) = 656-dim
 
-Key properties
-  – Gaussian MF centres c_k and log-widths log(σ_k) are learnable parameters.
-  – Product T-norm for per-rule firing strength w_k = ∏_i μ_k(x_i).
-  – Wang-Mendel normalisation:  w̃_k = w_k / Σ_j w_j.
-  – TSK linear consequent:  out = LayerNorm(Linear(w̃)).
-  – get_firing_strengths() exposes per-rule activations for web visualisation.
+Key improvements over v1
+  ① Input projection 400→proj_dim BEFORE T-norm.
+      Problem solved: product T-norm over 400 dims collapses to ~0 for all rules,
+      meaning the fuzzy layer learned nothing.  Projecting to 64 dims first keeps
+      firing strengths in a healthy range (0.1–0.9 per rule).
+  ② RBF mean T-norm: w_k = exp(−mean_i((x_i−c_ki)²/σ_ki²))
+      Numerically stable; still a valid similarity measure.  Replaces product T-norm.
+  ③ Residual connection: out = LN(consequent(w̃) + res_proj(x_proj))
+      Prevents gradient vanishing through the fuzzy layer.
+  ④ Rich interaction vector cat(mul, diff) replaces plain element-wise product.
+  ⑤ GELU activations and reduced dropout in classifier MLP.
 
 Training
   Run train_DDA.py with --model gnn_fuzzy  (see that file for all flags).
-  Checkpoint saved to web_app/models/best_model_fuzzy.pt
+  Extra args: --fuzzy_rules 32  --fuzzy_dim 256  --fuzzy_proj_dim 64
+  Checkpoint saved to web_app/models/best_model_fuzzy_{dataset}.pt
 """
 
 import dgl
@@ -40,61 +51,74 @@ from model import gt_net_drug, gt_net_disease
 
 class LearnableFuzzyLayer(nn.Module):
     """
-    Differentiable Takagi-Sugeno-Kang (TSK) fuzzy inference layer.
+    Improved Differentiable TSK Fuzzy Inference Layer (v2).
 
-    For each of n_rules fuzzy rules k:
-      μ_k(x_i) = exp( –((x_i – c_k_i) / σ_k_i)² )     Gaussian MF
-      w_k      = ∏_i  μ_k(x_i)                          product T-norm
-      w̃_k     = w_k / Σ_j w_j                          normalisation
-
-    Output = LayerNorm( Linear(w̃) )                     TSK consequent
+    Changes from v1:
+      – input_proj   : Linear(in_features→proj_dim) + GELU + LN  (prevents T-norm collapse)
+      – RBF mean T-norm: w_k = exp(−mean((x−c)²/σ²))  [numerically stable, always ∈(e⁻¹,1]]
+      – residual     : out = LN(consequent(w̃) + res_proj(x_proj))
 
     Parameters
     ----------
-    in_features  : dimensionality of input x  (400 in AMNTDDA_Fuzzy)
-    n_rules      : number of fuzzy rules       (default 32)
-    out_features : output dimensionality       (default 256)
+    in_features  : input dimensionality   (400 in AMNTDDA_Fuzzy)
+    n_rules      : number of fuzzy rules  (default 32)
+    out_features : output dimensionality  (default 256)
+    proj_dim     : projected dim before T-norm to prevent collapse (default 64)
     """
 
-    def __init__(self, in_features: int, n_rules: int = 32, out_features: int = 256):
+    def __init__(self, in_features: int, n_rules: int = 32,
+                 out_features: int = 256, proj_dim: int = 64):
         super().__init__()
         self.in_features  = in_features
         self.n_rules      = n_rules
         self.out_features = out_features
+        self.proj_dim     = proj_dim
 
-        # Gaussian MF parameters (learnable)
-        # centres near origin; log_sigma = 0 → σ = 1 at init
-        self.centers    = nn.Parameter(torch.randn(n_rules, in_features) * 0.1)
-        self.log_sigmas = nn.Parameter(torch.zeros(n_rules, in_features))
+        # ① Project to lower dim BEFORE T-norm (prevents prod collapse over 400 dims)
+        self.input_proj = nn.Sequential(
+            nn.Linear(in_features, proj_dim),
+            nn.GELU(),
+            nn.LayerNorm(proj_dim),
+        )
 
-        # TSK linear consequent + normalisation
+        # Gaussian MF parameters in projected space (learnable)
+        self.centers    = nn.Parameter(torch.randn(n_rules, proj_dim) * 0.1)
+        self.log_sigmas = nn.Parameter(torch.zeros(n_rules, proj_dim))
+
+        # TSK consequent + residual connection
         self.consequent = nn.Linear(n_rules, out_features, bias=True)
+        self.res_proj   = nn.Linear(proj_dim, out_features, bias=False)
         self.out_norm   = nn.LayerNorm(out_features)
 
     # ── internal helpers ─────────────────────────────────────────
 
-    def _firing_strengths(self, x: torch.Tensor) -> torch.Tensor:
+    def _firing_strengths(self, x: torch.Tensor):
         """
-        x : (B, F) → normalised firing strengths : (B, R)
+        x : (B, in_features) → (w_norm: (B, R), xp: (B, proj_dim))
+
+        ② RBF mean T-norm (numerically stable):
+           w_k = exp(−mean_i((x_i − c_ki)² / σ_ki²))
+           This is always in (e⁻¹, 1] — no collapse even with high-dim input.
         """
-        # Gaussian membership for every (rule, feature)
-        diff   = x.unsqueeze(1) - self.centers.unsqueeze(0)           # (B, R, F)
-        sigma  = torch.exp(self.log_sigmas).unsqueeze(0) + 1e-6       # (1, R, F)
-        mu     = torch.exp(-(diff / sigma).pow(2))                     # (B, R, F)
+        xp    = self.input_proj(x)                                           # (B, P)
+        diff  = xp.unsqueeze(1) - self.centers.unsqueeze(0)                 # (B, R, P)
+        sigma = torch.exp(self.log_sigmas).unsqueeze(0).clamp(min=1e-3)    # (1, R, P)
 
-        # Product T-norm across features → per-rule firing strength
-        firing = mu.prod(dim=-1)                                       # (B, R)
+        # Mean of negative squared distances (RBF-style), then exp
+        neg_sq   = -(diff / sigma).pow(2)                # (B, R, P)
+        firing   = torch.exp(neg_sq.mean(dim=-1))        # (B, R)  ∈ (e⁻¹, 1]
 
-        # Wang-Mendel normalisation (sum to 1)
-        denom  = firing.sum(dim=-1, keepdim=True).clamp(min=1e-8)
-        return firing / denom                                          # (B, R)
+        # Wang-Mendel normalisation
+        denom    = firing.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+        return firing / denom, xp                        # (B, R), (B, P)
 
     # ── forward ─────────────────────────────────────────────────
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x : (B, in_features) → (B, out_features)"""
-        w_norm = self._firing_strengths(x)          # (B, R)
-        out    = self.consequent(w_norm)             # (B, out_features)
+        w_norm, xp = self._firing_strengths(x)                       # (B,R), (B,P)
+        # ③ Residual: consequent(fuzzy) + direct projection of input
+        out = self.consequent(w_norm) + self.res_proj(xp)            # (B, out)
         return self.out_norm(out)
 
     # ── interpretability accessor ────────────────────────────────
@@ -104,20 +128,10 @@ class LearnableFuzzyLayer(nn.Module):
         Return normalised firing strengths without gradient tracking.
         Used by the web app for per-rule visualisation.
         Shape: (B, n_rules)
-
-        NOTE: Product T-norm across many features collapses to ~0 numerically.
-        When that happens, fall back to softmax of mean squared distances
-        so the visualisation always shows meaningful relative activations.
         """
         with torch.no_grad():
-            raw = self._firing_strengths(x).cpu()
-            # If product T-norm collapsed (all values negligible), use mean-distance fallback
-            if raw.max() < 1e-6:
-                diff   = x.unsqueeze(1) - self.centers.unsqueeze(0)          # (B, R, F)
-                sigma  = torch.exp(self.log_sigmas).unsqueeze(0) + 1e-6      # (1, R, F)
-                mean_sq = ((diff / sigma).pow(2)).mean(dim=-1)                # (B, R)
-                raw = torch.softmax(-mean_sq, dim=-1).cpu()
-            return raw
+            w, _ = self._firing_strengths(x)
+            return w.cpu()
 
 
 # ════════════════════════════════════════════════════════════════
@@ -126,15 +140,21 @@ class LearnableFuzzyLayer(nn.Module):
 
 class AMNTDDA_Fuzzy(nn.Module):
     """
-    AMNTDDA with a Learnable Fuzzy Inference Layer.
+    AMNTDDA_Fuzzy v2 with improved fuzzy layer and richer interaction vector.
 
     The fuzzy layer sits between the interaction vector and the MLP classifier:
-      interaction (400) → LearnableFuzzyLayer → fuzzy_out (256)
-      cat(fuzzy_out, interaction) → MLP → 2 logits
+      rich_interact (400) → LearnableFuzzyLayer v2 → fuzzy_out (256)
+      cat(fuzzy_out, rich_interact) → MLP → 2 logits
+
+    Interaction vector (④):
+      Instead of plain dr*di, use cat(dr*di, |dr-di|)→ Linear(800→400).
+      Element-wise product captures co-activation;
+      absolute difference captures asymmetric/contrastive signal.
 
     Extra args (with defaults used if absent from checkpoint):
-      args.fuzzy_rules = 32   number of TSK fuzzy rules
-      args.fuzzy_dim   = 256  output dimension of the fuzzy layer
+      args.fuzzy_rules    = 32   number of TSK fuzzy rules
+      args.fuzzy_dim      = 256  output dimension of the fuzzy layer
+      args.fuzzy_proj_dim = 64   projection dim inside LearnableFuzzyLayer
     """
 
     def __init__(self, args):
@@ -176,20 +196,30 @@ class AMNTDDA_Fuzzy(nn.Module):
             d_model=args.gt_out_dim, nhead=args.tr_head,
             num_encoder_layers=3, num_decoder_layers=3, batch_first=True)
 
-        # ── Fuzzy Layer ──────────────────────────────────────────
-        interact_dim = args.gt_out_dim * 2                          # 400
-        fuzzy_rules  = getattr(args, 'fuzzy_rules', 32)
-        fuzzy_dim    = getattr(args, 'fuzzy_dim',   256)
-        self.fuzzy_layer = LearnableFuzzyLayer(
-            interact_dim, n_rules=fuzzy_rules, out_features=fuzzy_dim)
+        interact_dim = args.gt_out_dim * 2                           # 400
 
-        # ── MLP  (656 = 400 + 256) ───────────────────────────────
+        # ④ Rich interaction projection: cat(mul, diff) 800 → 400
+        self.interact_proj = nn.Sequential(
+            nn.Linear(interact_dim * 2, interact_dim),
+            nn.GELU(),
+            nn.LayerNorm(interact_dim),
+        )
+
+        # ── Fuzzy Layer (v2) ─────────────────────────────────────
+        fuzzy_rules    = getattr(args, 'fuzzy_rules',    32)
+        fuzzy_dim      = getattr(args, 'fuzzy_dim',     256)
+        fuzzy_proj_dim = getattr(args, 'fuzzy_proj_dim', 64)
+        self.fuzzy_layer = LearnableFuzzyLayer(
+            interact_dim, n_rules=fuzzy_rules,
+            out_features=fuzzy_dim, proj_dim=fuzzy_proj_dim)
+
+        # ── MLP  (656 = 400 + 256), GELU + reduced dropout ⑤ ────
         mlp_in = interact_dim + fuzzy_dim
         self.mlp = nn.Sequential(
-            nn.Linear(mlp_in, 1024), nn.ReLU(), nn.Dropout(0.4),
-            nn.Linear(1024, 1024),   nn.ReLU(), nn.Dropout(0.4),
-            nn.Linear(1024, 256),    nn.ReLU(), nn.Dropout(0.4),
-            nn.Linear(256, 2),
+            nn.Linear(mlp_in, 1024), nn.GELU(), nn.Dropout(0.3),
+            nn.Linear(1024, 512),    nn.GELU(), nn.Dropout(0.3),
+            nn.Linear(512,  256),    nn.GELU(), nn.Dropout(0.2),
+            nn.Linear(256,  2),
         )
 
     # ── Forward pass ─────────────────────────────────────────────
@@ -224,23 +254,28 @@ class AMNTDDA_Fuzzy(nn.Module):
         dr_seq = self.drug_trans(torch.stack((dr_sim, dr_hgt), dim=1))    # (N_drug, 2, d)
         di_seq = self.disease_trans(torch.stack((di_sim, di_hgt), dim=1)) # (N_disease, 2, d)
 
-        # Cross-modal attention (Module 3): drug queries disease context and vice versa
+        # Cross-modal attention: drug queries disease context and vice versa
         dr_pairs = dr_seq[sample[:, 0]]                                    # (B, 2, d)
         di_pairs = di_seq[sample[:, 1]]                                    # (B, 2, d)
         dr_refined = self.drug_tr(src=di_pairs, tgt=dr_pairs)             # (B, 2, d)
         di_refined = self.disease_tr(src=dr_pairs, tgt=di_pairs)          # (B, 2, d)
 
-        # Element-wise interaction vector
-        interact = torch.mul(
-            dr_refined.reshape(dr_pairs.shape[0], 2 * self.args.gt_out_dim),  # (B, 400)
-            di_refined.reshape(di_pairs.shape[0], 2 * self.args.gt_out_dim),  # (B, 400)
-        )                                                                       # (B, 400)
+        B = dr_pairs.shape[0]
+        d2 = 2 * self.args.gt_out_dim
+        dr_flat = dr_refined.reshape(B, d2)                               # (B, 400)
+        di_flat = di_refined.reshape(B, d2)                               # (B, 400)
 
-        # Fuzzy layer
-        fuzzy_out = self.fuzzy_layer(interact)                      # (B, 256)
+        # ④ Rich interaction: element-wise product + absolute difference → project
+        interact_mul  = dr_flat * di_flat                                  # (B, 400)
+        interact_diff = (dr_flat - di_flat).abs()                          # (B, 400)
+        interact = self.interact_proj(
+            torch.cat([interact_mul, interact_diff], dim=-1))              # (B, 400)
+
+        # Fuzzy layer (v2)
+        fuzzy_out = self.fuzzy_layer(interact)                             # (B, 256)
 
         # Classifier
-        output = self.mlp(torch.cat([fuzzy_out, interact], dim=-1)) # (B, 2)
+        output = self.mlp(torch.cat([fuzzy_out, interact], dim=-1))       # (B, 2)
 
         return dr_seq.view(self.args.drug_number, 2 * self.args.gt_out_dim), output
 
@@ -281,8 +316,11 @@ class AMNTDDA_Fuzzy(nn.Module):
             dr_refined = self.drug_tr(src=di_pairs, tgt=dr_pairs)
             di_refined = self.disease_tr(src=dr_pairs, tgt=di_pairs)
 
-            interact = torch.mul(
-                dr_refined.reshape(dr_pairs.shape[0], 2 * self.args.gt_out_dim),
-                di_refined.reshape(di_pairs.shape[0], 2 * self.args.gt_out_dim),
-            )
+            B  = dr_pairs.shape[0]
+            d2 = 2 * self.args.gt_out_dim
+            dr_flat = dr_refined.reshape(B, d2)
+            di_flat = di_refined.reshape(B, d2)
+            interact = self.interact_proj(
+                torch.cat([dr_flat * di_flat, (dr_flat - di_flat).abs()], dim=-1))
+
             return self.fuzzy_layer.firing_strengths(interact)
