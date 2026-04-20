@@ -17,7 +17,9 @@ Hệ thống dự đoán liên kết thuốc-bệnh sử dụng Graph Neural Net
 | google-genai | >=1.0 |
 | replicate | >=0.25.0 |
 
-> Cần **GPU CUDA 12.1+** để chạy model. CPU-only sẽ rất chậm.
+
+
+
 
 ### Cài đặt
 

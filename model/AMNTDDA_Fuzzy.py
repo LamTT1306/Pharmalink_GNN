@@ -51,23 +51,28 @@ from model import gt_net_drug, gt_net_disease
 
 class LearnableFuzzyLayer(nn.Module):
     """
-    Improved Differentiable TSK Fuzzy Inference Layer (v2).
+    Improved Differentiable TSK Fuzzy Inference Layer (v3).
 
-    Changes from v1:
-      – input_proj   : Linear(in_features→proj_dim) + GELU + LN  (prevents T-norm collapse)
-      – RBF mean T-norm: w_k = exp(−mean((x−c)²/σ²))  [numerically stable, always ∈(e⁻¹,1]]
-      – residual     : out = LN(consequent(w̃) + res_proj(x_proj))
+    Changes from v2:
+      – Temperature scaling T (learnable): sharpens/softens Wang-Mendel weights.
+          w_k = exp(−mean((x−c)²/(σ²·T)))  →  T<1 sharpens, T>1 softens.
+      – Fuzzy Dropout (p=fuzzy_dropout): randomly zeros firing strengths during
+          training to prevent over-reliance on a few dominant rules.
+      – raw_w (pre-norm firing strengths) exposed via _firing_strengths so
+          train_DDA can apply L1 sparsity loss on them directly.
 
     Parameters
     ----------
-    in_features  : input dimensionality   (400 in AMNTDDA_Fuzzy)
-    n_rules      : number of fuzzy rules  (default 32)
-    out_features : output dimensionality  (default 256)
-    proj_dim     : projected dim before T-norm to prevent collapse (default 64)
+    in_features    : input dimensionality   (400 in AMNTDDA_Fuzzy)
+    n_rules        : number of fuzzy rules  (default 32)
+    out_features   : output dimensionality  (default 256)
+    proj_dim       : projected dim before T-norm (default 64)
+    fuzzy_dropout  : dropout rate on normalised firing strengths (default 0.1)
     """
 
     def __init__(self, in_features: int, n_rules: int = 32,
-                 out_features: int = 256, proj_dim: int = 64):
+                 out_features: int = 256, proj_dim: int = 64,
+                 fuzzy_dropout: float = 0.1):
         super().__init__()
         self.in_features  = in_features
         self.n_rules      = n_rules
@@ -85,6 +90,13 @@ class LearnableFuzzyLayer(nn.Module):
         self.centers    = nn.Parameter(torch.randn(n_rules, proj_dim) * 0.1)
         self.log_sigmas = nn.Parameter(torch.zeros(n_rules, proj_dim))
 
+        # ③ Temperature scaling — learnable, clamped to (0.1, 10) during forward
+        # init = log(1) = 0  →  T_init = 1.0 (neutral starting point)
+        self.log_temperature = nn.Parameter(torch.zeros(1))
+
+        # Fuzzy Dropout — only active during training
+        self.rule_dropout = nn.Dropout(p=fuzzy_dropout)
+
         # TSK consequent + residual connection
         self.consequent = nn.Linear(n_rules, out_features, bias=True)
         self.res_proj   = nn.Linear(proj_dim, out_features, bias=False)
@@ -94,31 +106,45 @@ class LearnableFuzzyLayer(nn.Module):
 
     def _firing_strengths(self, x: torch.Tensor):
         """
-        x : (B, in_features) → (w_norm: (B, R), xp: (B, proj_dim))
+        x : (B, in_features) → (raw_w: (B,R), w_norm: (B,R), xp: (B,P))
 
-        ② RBF mean T-norm (numerically stable):
-           w_k = exp(−mean_i((x_i − c_ki)² / σ_ki²))
-           This is always in (e⁻¹, 1] — no collapse even with high-dim input.
+        Returns raw_w (pre-normalisation) so the caller can compute
+        L1 sparsity loss on it — after Wang-Mendel normalisation
+        sum(w̃)=1 always, making L1(w̃) a useless constant.
+
+        Temperature T < 1  →  sharpens firing (luật nào mạnh càng mạnh)
+        Temperature T > 1  →  softens  firing (trải đều hơn)
         """
-        xp    = self.input_proj(x)                                           # (B, P)
-        diff  = xp.unsqueeze(1) - self.centers.unsqueeze(0)                 # (B, R, P)
-        sigma = torch.exp(self.log_sigmas).unsqueeze(0).clamp(min=1e-3)    # (1, R, P)
+        xp   = self.input_proj(x)                                        # (B, P)
+        diff = xp.unsqueeze(1) - self.centers.unsqueeze(0)               # (B, R, P)
+        sigma = torch.exp(self.log_sigmas).unsqueeze(0).clamp(min=1e-3) # (1, R, P)
 
-        # Mean of negative squared distances (RBF-style), then exp
-        neg_sq   = -(diff / sigma).pow(2)                # (B, R, P)
-        firing   = torch.exp(neg_sq.mean(dim=-1))        # (B, R)  ∈ (e⁻¹, 1]
+        # ③ Temperature scaling applied inside the exponent
+        T       = torch.exp(self.log_temperature).clamp(min=0.1, max=10.0)  # scalar
+        neg_sq  = -(diff / sigma).pow(2) / T                             # (B, R, P)
+        raw_w   = torch.exp(neg_sq.mean(dim=-1))                         # (B, R) pre-norm
 
         # Wang-Mendel normalisation
-        denom    = firing.sum(dim=-1, keepdim=True).clamp(min=1e-8)
-        return firing / denom, xp                        # (B, R), (B, P)
+        denom  = raw_w.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+        w_norm = raw_w / denom                                           # (B, R)
+
+        return raw_w, w_norm, xp
 
     # ── forward ─────────────────────────────────────────────────
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x : (B, in_features) → (B, out_features)"""
-        w_norm, xp = self._firing_strengths(x)                       # (B,R), (B,P)
-        # ③ Residual: consequent(fuzzy) + direct projection of input
-        out = self.consequent(w_norm) + self.res_proj(xp)            # (B, out)
+        raw_w, w_norm, xp = self._firing_strengths(x)       # (B,R), (B,R), (B,P)
+
+        # Cache raw_w so train_DDA can compute L1 sparsity loss without
+        # an extra forward pass (no new computation, just a reference).
+        self._last_raw_w = raw_w
+
+        # ① Fuzzy Dropout: randomly silence rules during training
+        w_drop = self.rule_dropout(w_norm)                  # (B, R)
+
+        # Residual: consequent(fuzzy) + direct projection of input
+        out = self.consequent(w_drop) + self.res_proj(xp)   # (B, out)
         return self.out_norm(out)
 
     # ── interpretability accessor ────────────────────────────────
@@ -130,7 +156,7 @@ class LearnableFuzzyLayer(nn.Module):
         Shape: (B, n_rules)
         """
         with torch.no_grad():
-            w, _ = self._firing_strengths(x)
+            _, w, _ = self._firing_strengths(x)
             return w.cpu()
 
 
@@ -189,36 +215,32 @@ class AMNTDDA_Fuzzy(nn.Module):
         self.drug_trans    = nn.TransformerEncoder(encoder_layer, num_layers=args.tr_layer)
         self.disease_trans = nn.TransformerEncoder(encoder_layer, num_layers=args.tr_layer)
 
-        self.drug_tr = nn.Transformer(
-            d_model=args.gt_out_dim, nhead=args.tr_head,
-            num_encoder_layers=3, num_decoder_layers=3, batch_first=True)
-        self.disease_tr = nn.Transformer(
-            d_model=args.gt_out_dim, nhead=args.tr_head,
-            num_encoder_layers=3, num_decoder_layers=3, batch_first=True)
-
         interact_dim = args.gt_out_dim * 2                           # 400
 
-        # ④ Rich interaction projection: cat(mul, diff) 800 → 400
-        self.interact_proj = nn.Sequential(
-            nn.Linear(interact_dim * 2, interact_dim),
-            nn.GELU(),
-            nn.LayerNorm(interact_dim),
-        )
-
-        # ── Fuzzy Layer (v2) ─────────────────────────────────────
+        # ── Fuzzy Layer (v3) ─────────────────────────────────────
         fuzzy_rules    = getattr(args, 'fuzzy_rules',    32)
         fuzzy_dim      = getattr(args, 'fuzzy_dim',     256)
         fuzzy_proj_dim = getattr(args, 'fuzzy_proj_dim', 64)
+        fuzzy_dropout  = getattr(args, 'fuzzy_dropout', 0.05)
         self.fuzzy_layer = LearnableFuzzyLayer(
             interact_dim, n_rules=fuzzy_rules,
-            out_features=fuzzy_dim, proj_dim=fuzzy_proj_dim)
+            out_features=fuzzy_dim, proj_dim=fuzzy_proj_dim,
+            fuzzy_dropout=fuzzy_dropout)
 
-        # ── MLP  (656 = 400 + 256), GELU + reduced dropout ⑤ ────
-        mlp_in = interact_dim + fuzzy_dim
+        # ── Fuzzy residual correction (fuzzy_dim → interact_dim) ─
+        # Projects fuzzy features back to interaction space as a residual
+        # correction.  Small-std init so correction ≈ 0 at start (model
+        # behaves like baseline until fuzzy layer warms up).
+        self.fuzzy_correction = nn.Linear(fuzzy_dim, interact_dim, bias=False)
+        nn.init.normal_(self.fuzzy_correction.weight, std=0.01)
+
+        # ── MLP — identical structure to AMNTDDA baseline ────────
+        # Input dim kept at 400 (same as baseline) so parameter count
+        # and regularisation exactly match the proven configuration.
         self.mlp = nn.Sequential(
-            nn.Linear(mlp_in, 1024), nn.GELU(), nn.Dropout(0.3),
-            nn.Linear(1024, 512),    nn.GELU(), nn.Dropout(0.3),
-            nn.Linear(512,  256),    nn.GELU(), nn.Dropout(0.2),
+            nn.Linear(interact_dim, 1024), nn.ReLU(), nn.Dropout(0.4),
+            nn.Linear(1024, 1024),         nn.ReLU(), nn.Dropout(0.4),
+            nn.Linear(1024, 256),          nn.ReLU(), nn.Dropout(0.4),
             nn.Linear(256,  2),
         )
 
@@ -250,34 +272,26 @@ class AMNTDDA_Fuzzy(nn.Module):
         di_hgt = hgt_out[self.args.drug_number:
                          self.args.disease_number + self.args.drug_number, :]
 
-        # Self-fusion: TransformerEncoder combines similarity + network features
-        dr_seq = self.drug_trans(torch.stack((dr_sim, dr_hgt), dim=1))    # (N_drug, 2, d)
-        di_seq = self.disease_trans(torch.stack((di_sim, di_hgt), dim=1)) # (N_disease, 2, d)
+        # Self-fusion — identical to AMNTDDA baseline
+        dr = self.drug_trans(torch.stack((dr_sim, dr_hgt), dim=1))        # (N_drug, 2, d)
+        di = self.disease_trans(torch.stack((di_sim, di_hgt), dim=1))     # (N_disease, 2, d)
+        dr = dr.view(self.args.drug_number,    2 * self.args.gt_out_dim)  # (N_drug, 400)
+        di = di.view(self.args.disease_number, 2 * self.args.gt_out_dim)  # (N_disease, 400)
 
-        # Cross-modal attention: drug queries disease context and vice versa
-        dr_pairs = dr_seq[sample[:, 0]]                                    # (B, 2, d)
-        di_pairs = di_seq[sample[:, 1]]                                    # (B, 2, d)
-        dr_refined = self.drug_tr(src=di_pairs, tgt=dr_pairs)             # (B, 2, d)
-        di_refined = self.disease_tr(src=dr_pairs, tgt=di_pairs)          # (B, 2, d)
+        # Interaction: element-wise product — identical to AMNTDDA baseline
+        interact = dr[sample[:, 0]] * di[sample[:, 1]]                    # (B, 400)
 
-        B = dr_pairs.shape[0]
-        d2 = 2 * self.args.gt_out_dim
-        dr_flat = dr_refined.reshape(B, d2)                               # (B, 400)
-        di_flat = di_refined.reshape(B, d2)                               # (B, 400)
+        # Fuzzy residual correction — gradient-decoupled.
+        # detach() keeps backbone gradient identical to baseline;
+        # fuzzy_lr_ratio=1.0 lets the fuzzy layer learn fast independently.
+        fuzzy_out  = self.fuzzy_layer(interact.detach())                  # (B, 256)
+        correction = self.fuzzy_correction(fuzzy_out)                     # (B, 400)
+        enhanced   = interact + correction                                 # (B, 400)
 
-        # ④ Rich interaction: element-wise product + absolute difference → project
-        interact_mul  = dr_flat * di_flat                                  # (B, 400)
-        interact_diff = (dr_flat - di_flat).abs()                          # (B, 400)
-        interact = self.interact_proj(
-            torch.cat([interact_mul, interact_diff], dim=-1))              # (B, 400)
+        # Classifier: same 400-dim input as AMNTDDA baseline
+        output = self.mlp(enhanced)                                        # (B, 2)
 
-        # Fuzzy layer (v2)
-        fuzzy_out = self.fuzzy_layer(interact)                             # (B, 256)
-
-        # Classifier
-        output = self.mlp(torch.cat([fuzzy_out, interact], dim=-1))       # (B, 2)
-
-        return dr_seq.view(self.args.drug_number, 2 * self.args.gt_out_dim), output
+        return dr, output
 
     # ── Interpretability ─────────────────────────────────────────
 
@@ -308,19 +322,10 @@ class AMNTDDA_Fuzzy(nn.Module):
             di_hgt = hgt_out[self.args.drug_number:
                              self.args.disease_number + self.args.drug_number, :]
 
-            dr_seq = self.drug_trans(torch.stack((dr_sim, dr_hgt), dim=1))
-            di_seq = self.disease_trans(torch.stack((di_sim, di_hgt), dim=1))
-
-            dr_pairs = dr_seq[sample[:, 0]]
-            di_pairs = di_seq[sample[:, 1]]
-            dr_refined = self.drug_tr(src=di_pairs, tgt=dr_pairs)
-            di_refined = self.disease_tr(src=dr_pairs, tgt=di_pairs)
-
-            B  = dr_pairs.shape[0]
-            d2 = 2 * self.args.gt_out_dim
-            dr_flat = dr_refined.reshape(B, d2)
-            di_flat = di_refined.reshape(B, d2)
-            interact = self.interact_proj(
-                torch.cat([dr_flat * di_flat, (dr_flat - di_flat).abs()], dim=-1))
+            dr = self.drug_trans(torch.stack((dr_sim, dr_hgt), dim=1))
+            di = self.disease_trans(torch.stack((di_sim, di_hgt), dim=1))
+            dr = dr.view(self.args.drug_number,    2 * self.args.gt_out_dim)
+            di = di.view(self.args.disease_number, 2 * self.args.gt_out_dim)
+            interact = dr[sample[:, 0]] * di[sample[:, 1]]
 
             return self.fuzzy_layer.firing_strengths(interact)

@@ -1,115 +1,262 @@
 {% extends 'base.html' %}
-{% block title %}Admin – Thống kê{% endblock %}
+{% block title %}Admin – Thống kê hệ thống{% endblock %}
 {% block head %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<style>
+.mini-stat-glass {
+  background:rgba(255,255,255,.13);
+  border:1px solid rgba(255,255,255,.2);
+  backdrop-filter:blur(10px);
+  border-radius:16px;
+  padding:1.2rem 1.5rem;
+  transition:transform .2s,background .2s;
+  color:#fff;
+}
+.mini-stat-glass:hover { transform:translateY(-3px); background:rgba(255,255,255,.2); }
+.mini-stat-glass .val { font-size:2.2rem;font-weight:800;line-height:1; }
+.mini-stat-glass .lbl { font-size:.72rem;opacity:.75;margin-top:.3rem;letter-spacing:.5px; }
+.chart-card {
+  background:#fff; border-radius:18px;
+  box-shadow:0 4px 24px rgba(0,0,0,.07); border:none; overflow:hidden;
+  transition:box-shadow .2s, transform .2s;
+}
+.chart-card:hover { box-shadow:0 10px 36px rgba(0,0,0,.12); transform:translateY(-2px); }
+.chart-card-hdr {
+  padding:1rem 1.5rem; display:flex; align-items:center; gap:.75rem;
+  border-bottom:1px solid #f1f5f9;
+}
+.chart-card-hdr .icon-p {
+  width:36px;height:36px;border-radius:10px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:1.05rem;color:#fff;flex-shrink:0;
+}
+.chart-card-hdr .ttl { font-weight:700;color:#1e293b;font-size:.93rem; }
+.chart-card-hdr .sub { font-size:.7rem;color:#94a3b8;margin-top:1px; }
+.chart-body { padding:1.2rem 1.4rem 1.5rem; }
+.stat-rec-row { transition:background .12s; }
+.stat-rec-row:hover { background:#f8fafc !important; }
+</style>
+{% endblock %}
+{% block page_title %}Thống kê hệ thống{% endblock %}
+{% block breadcrumb %}
+  <li class="breadcrumb-item"><a href="{{ url_for('admin_dashboard') }}">Admin</a></li>
+  <li class="breadcrumb-item active">Thống kê</li>
 {% endblock %}
 {% block content %}
-<h4 class="fw-bold mb-4"><i class="bi bi-bar-chart-line me-2 text-warning"></i>Thống kê hệ thống</h4>
 
-<div class="row g-4">
-  <!-- Predictions over time -->
-  <div class="col-12">
-    <div class="card border-0 shadow-sm">
-      <div class="card-header bg-white fw-bold">Dự đoán theo ngày (30 ngày gần nhất)</div>
-      <div class="card-body"><canvas id="chartTime" height="80"></canvas></div>
+<!-- Hero Banner -->
+<div class="hero-banner mb-4 fade-in-up" style="background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 35%,#312e81 65%,#7c3aed 100%)">
+  <div class="position-relative" style="z-index:1">
+    <div class="d-flex align-items-center gap-3 mb-3">
+      <div style="width:56px;height:56px;border-radius:16px;background:rgba(255,255,255,.18);display:flex;align-items:center;justify-content:center;font-size:2rem">
+        <i class="bi bi-bar-chart-line-fill"></i>
+      </div>
+      <div>
+        <h4 class="fw-bold mb-1">Thống kê hệ thống</h4>
+        <p class="mb-0 opacity-75 small">Phân tích toàn bộ hoạt động của PharmaLink_GNN</p>
+      </div>
     </div>
-  </div>
-
-  <!-- Top drugs -->
-  <div class="col-md-6">
-    <div class="card border-0 shadow-sm">
-      <div class="card-header bg-white fw-bold">Top 10 thuốc được tra cứu nhiều nhất</div>
-      <div class="card-body"><canvas id="chartDrugs"></canvas></div>
-    </div>
-  </div>
-
-  <!-- Top diseases -->
-  <div class="col-md-6">
-    <div class="card border-0 shadow-sm">
-      <div class="card-header bg-white fw-bold">Top 10 bệnh được tra cứu nhiều nhất</div>
-      <div class="card-body"><canvas id="chartDiseases"></canvas></div>
-    </div>
-  </div>
-
-  <!-- By type pie -->
-  <div class="col-md-4">
-    <div class="card border-0 shadow-sm">
-      <div class="card-header bg-white fw-bold">Phân loại truy vấn</div>
-      <div class="card-body"><canvas id="chartType"></canvas></div>
+    <div class="row g-3 mt-1">
+      <div class="col-6 col-md-3">
+        <div class="mini-stat-glass">
+          <div class="val">{{ stat_data.total_predictions }}</div>
+          <div class="lbl"><i class="bi bi-cpu me-1"></i>Tổng dự đoán</div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="mini-stat-glass">
+          <div class="val">{{ stat_data.by_type | selectattr('query_type','equalto','drug') | map(attribute='count') | first | default(0) }}</div>
+          <div class="lbl"><i class="bi bi-capsule me-1"></i>Truy vấn thuốc</div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="mini-stat-glass">
+          <div class="val">{{ stat_data.by_type | selectattr('query_type','equalto','disease') | map(attribute='count') | first | default(0) }}</div>
+          <div class="lbl"><i class="bi bi-heart-pulse me-1"></i>Truy vấn bệnh</div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="mini-stat-glass">
+          <div class="val">{{ stat_data.active_users }}</div>
+          <div class="lbl"><i class="bi bi-people me-1"></i>Người dùng hoạt động</div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
+
+<!-- Row 1: Timeline + Donut -->
+<div class="row g-4 mb-4">
+  <div class="col-lg-8">
+    <div class="chart-card h-100">
+      <div class="chart-card-hdr">
+        <div class="icon-p" style="background:linear-gradient(135deg,#3b82f6,#2563eb)"><i class="bi bi-graph-up-arrow"></i></div>
+        <div><div class="ttl">Dự đoán theo ngày</div><div class="sub">30 ngày gần nhất</div></div>
+      </div>
+      <div class="chart-body"><canvas id="chartTime" height="80"></canvas></div>
+    </div>
+  </div>
+  <div class="col-lg-4">
+    <div class="chart-card h-100">
+      <div class="chart-card-hdr">
+        <div class="icon-p" style="background:linear-gradient(135deg,#f59e0b,#d97706)"><i class="bi bi-pie-chart-fill"></i></div>
+        <div><div class="ttl">Phân loại truy vấn</div><div class="sub">Thuốc vs Bệnh</div></div>
+      </div>
+      <div class="chart-body d-flex align-items-center justify-content-center" style="min-height:240px">
+        <canvas id="chartType" style="max-height:230px"></canvas>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Row 2: Top drugs + Top diseases -->
+<div class="row g-4 mb-4">
+  <div class="col-md-6">
+    <div class="chart-card">
+      <div class="chart-card-hdr">
+        <div class="icon-p" style="background:linear-gradient(135deg,#10b981,#059669)"><i class="bi bi-capsule-pill"></i></div>
+        <div><div class="ttl">Top 10 thuốc tra cứu nhiều nhất</div><div class="sub">Theo số lượt dự đoán</div></div>
+      </div>
+      <div class="chart-body"><canvas id="chartDrugs" height="180"></canvas></div>
+    </div>
+  </div>
+  <div class="col-md-6">
+    <div class="chart-card">
+      <div class="chart-card-hdr">
+        <div class="icon-p" style="background:linear-gradient(135deg,#ef4444,#dc2626)"><i class="bi bi-heart-pulse-fill"></i></div>
+        <div><div class="ttl">Top 10 bệnh tra cứu nhiều nhất</div><div class="sub">Theo số lượt dự đoán</div></div>
+      </div>
+      <div class="chart-body"><canvas id="chartDiseases" height="180"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<!-- Row 3: Per-user + Recent predictions -->
+<div class="row g-4">
+  <div class="col-lg-5">
+    <div class="chart-card h-100">
+      <div class="chart-card-hdr">
+        <div class="icon-p" style="background:linear-gradient(135deg,#8b5cf6,#7c3aed)"><i class="bi bi-person-badge"></i></div>
+        <div><div class="ttl">Dự đoán theo người dùng</div><div class="sub">Top 10 người dùng tích cực</div></div>
+      </div>
+      <div class="chart-body"><canvas id="chartUsers" height="200"></canvas></div>
+    </div>
+  </div>
+  <div class="col-lg-7">
+    <div class="chart-card h-100">
+      <div class="chart-card-hdr">
+        <div class="icon-p" style="background:linear-gradient(135deg,#06b6d4,#0891b2)"><i class="bi bi-clock-history"></i></div>
+        <div><div class="ttl">Dự đoán gần đây</div><div class="sub">10 truy vấn mới nhất trong hệ thống</div></div>
+      </div>
+      <div class="table-responsive">
+        <table class="table align-middle mb-0" style="font-size:.84rem">
+          <thead style="background:#f8fafc">
+            <tr style="font-size:.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.5px">
+              <th style="padding:.75rem 1rem;border:none;font-weight:600">Truy vấn</th>
+              <th style="padding:.75rem 1rem;border:none;font-weight:600">Loại</th>
+              <th style="padding:.75rem 1rem;border:none;font-weight:600">Người dùng</th>
+              <th style="padding:.75rem 1rem;border:none;font-weight:600">Thời gian</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in stat_data.recent_predictions %}
+            <tr class="stat-rec-row" style="border-bottom:1px solid #f1f5f9">
+              <td style="padding:.65rem 1rem;font-weight:600;color:#1e293b">{{ r.query_name }}</td>
+              <td style="padding:.65rem 1rem">
+                {% if r.query_type == 'drug' %}
+                  <span class="badge" style="background:linear-gradient(135deg,#3b82f6,#2563eb);font-size:.65rem;padding:.3rem .6rem;border-radius:6px">Thuốc</span>
+                {% else %}
+                  <span class="badge" style="background:linear-gradient(135deg,#ef4444,#dc2626);font-size:.65rem;padding:.3rem .6rem;border-radius:6px">Bệnh</span>
+                {% endif %}
+              </td>
+              <td style="padding:.65rem 1rem">
+                <div style="display:flex;align-items:center;gap:.4rem;color:#64748b">
+                  <div style="width:24px;height:24px;border-radius:50%;background:linear-gradient(135deg,#3b82f6,#8b5cf6);display:flex;align-items:center;justify-content:center;color:#fff;font-size:.62rem;font-weight:700;flex-shrink:0">{{ (r.username or '?')[0].upper() }}</div>
+                  {{ r.username or '–' }}
+                </div>
+              </td>
+              <td style="padding:.65rem 1rem;color:#94a3b8;font-size:.75rem;white-space:nowrap">{{ r.created_at[:16].replace('T',' ') if r.created_at else '–' }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="4" class="text-center text-muted py-5">Chưa có dữ liệu</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
 {% endblock %}
 
 {% block scripts %}
 <script>
 const stats = {{ stat_data | tojson }};
 
-// Time chart
-new Chart(document.getElementById('chartTime'), {
-  type: 'line',
-  data: {
-    labels: stats.predictions_per_day.map(r => r.date),
-    datasets: [{
-      label: 'Số dự đoán',
-      data: stats.predictions_per_day.map(r => r.count),
-      borderColor: '#0d6efd',
-      backgroundColor: 'rgba(13,110,253,0.1)',
-      tension: 0.3,
-      fill: true,
-    }]
-  },
-  options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
-});
+function mkGrad(ctx, c1, c2) {
+  const g = ctx.createLinearGradient(0,0,0,ctx.canvas.height);
+  g.addColorStop(0,c1); g.addColorStop(1,c2); return g;
+}
+
+// Timeline
+(function(){
+  const ctx = document.getElementById('chartTime').getContext('2d');
+  const fill = mkGrad(ctx,'rgba(59,130,246,.35)','rgba(59,130,246,.02)');
+  new Chart(ctx,{
+    type:'line',
+    data:{ labels:stats.predictions_per_day.map(r=>r.date),
+      datasets:[{label:'Dự đoán',data:stats.predictions_per_day.map(r=>r.count),
+        borderColor:'#3b82f6',backgroundColor:fill,borderWidth:2.5,tension:.4,fill:true,
+        pointBackgroundColor:'#fff',pointBorderColor:'#3b82f6',pointBorderWidth:2,pointRadius:4,pointHoverRadius:7}]},
+    options:{animation:{duration:800},plugins:{legend:{display:false},tooltip:{callbacks:{title:t=>'Ngày '+t[0].label,label:t=>` ${t.raw} dự đoán`}}},
+      scales:{x:{grid:{display:false},ticks:{color:'#94a3b8',font:{size:11}}},y:{beginAtZero:true,grid:{color:'#f1f5f9'},ticks:{color:'#94a3b8',font:{size:11}}}}}
+  });
+})();
+
+// Donut
+(function(){
+  const typeMap={drug:'Thuốc → Bệnh',disease:'Bệnh → Thuốc',protein:'Protein'};
+  new Chart(document.getElementById('chartType'),{
+    type:'doughnut',
+    data:{labels:stats.by_type.map(r=>typeMap[r.query_type]||r.query_type),
+      datasets:[{data:stats.by_type.map(r=>r.count),backgroundColor:['#3b82f6','#ef4444','#10b981'],borderWidth:0,hoverOffset:10}]},
+    options:{cutout:'65%',animation:{duration:900,easing:'easeOutBack'},
+      plugins:{legend:{position:'bottom',labels:{padding:16,font:{size:12}}},tooltip:{callbacks:{label:t=>` ${t.label}: ${t.raw} lượt`}}}}
+  });
+})();
 
 // Top drugs
-new Chart(document.getElementById('chartDrugs'), {
-  type: 'bar',
-  data: {
-    labels: stats.top_drugs.map(r => r.query_name),
-    datasets: [{
-      label: 'Lượt tra cứu',
-      data: stats.top_drugs.map(r => r.count),
-      backgroundColor: '#198754',
-    }]
-  },
-  options: {
-    indexAxis: 'y',
-    plugins: { legend: { display: false } },
-    scales: { x: { beginAtZero: true } }
-  }
-});
+(function(){
+  const ctx=document.getElementById('chartDrugs').getContext('2d');
+  new Chart(ctx,{type:'bar',
+    data:{labels:stats.top_drugs.map(r=>r.query_name),datasets:[{label:'Lượt',data:stats.top_drugs.map(r=>r.count),
+      backgroundColor:mkGrad(ctx,'#10b981','#059669'),borderRadius:6,borderSkipped:false}]},
+    options:{indexAxis:'y',animation:{duration:700},plugins:{legend:{display:false},tooltip:{callbacks:{label:t=>` ${t.raw} lượt`}}},
+      scales:{x:{beginAtZero:true,grid:{color:'#f1f5f9'},ticks:{color:'#94a3b8',font:{size:11}}},y:{grid:{display:false},ticks:{color:'#475569',font:{size:11}}}}}
+  });
+})();
 
 // Top diseases
-new Chart(document.getElementById('chartDiseases'), {
-  type: 'bar',
-  data: {
-    labels: stats.top_diseases.map(r => r.query_name),
-    datasets: [{
-      label: 'Lượt tra cứu',
-      data: stats.top_diseases.map(r => r.count),
-      backgroundColor: '#dc3545',
-    }]
-  },
-  options: {
-    indexAxis: 'y',
-    plugins: { legend: { display: false } },
-    scales: { x: { beginAtZero: true } }
-  }
-});
+(function(){
+  const ctx=document.getElementById('chartDiseases').getContext('2d');
+  new Chart(ctx,{type:'bar',
+    data:{labels:stats.top_diseases.map(r=>r.query_name),datasets:[{label:'Lượt',data:stats.top_diseases.map(r=>r.count),
+      backgroundColor:mkGrad(ctx,'#ef4444','#dc2626'),borderRadius:6,borderSkipped:false}]},
+    options:{indexAxis:'y',animation:{duration:700},plugins:{legend:{display:false},tooltip:{callbacks:{label:t=>` ${t.raw} lượt`}}},
+      scales:{x:{beginAtZero:true,grid:{color:'#f1f5f9'},ticks:{color:'#94a3b8',font:{size:11}}},y:{grid:{display:false},ticks:{color:'#475569',font:{size:11}}}}}
+  });
+})();
 
-// By type
-const typeMap = { drug: 'Thuốc → Bệnh', disease: 'Bệnh → Thuốc' };
-new Chart(document.getElementById('chartType'), {
-  type: 'doughnut',
-  data: {
-    labels: stats.by_type.map(r => typeMap[r.query_type] || r.query_type),
-    datasets: [{
-      data: stats.by_type.map(r => r.count),
-      backgroundColor: ['#0d6efd', '#dc3545'],
-    }]
-  },
-  options: { plugins: { legend: { position: 'bottom' } } }
-});
+// Per-user
+(function(){
+  const ctx=document.getElementById('chartUsers').getContext('2d');
+  new Chart(ctx,{type:'bar',
+    data:{labels:stats.per_user.map(r=>r.username),datasets:[{label:'Dự đoán',data:stats.per_user.map(r=>r.count),
+      backgroundColor:mkGrad(ctx,'#8b5cf6','#7c3aed'),borderRadius:8,borderSkipped:false}]},
+    options:{animation:{duration:700},plugins:{legend:{display:false},tooltip:{callbacks:{label:t=>` ${t.raw} dự đoán`}}},
+      scales:{x:{grid:{display:false},ticks:{color:'#475569',font:{size:11}}},y:{beginAtZero:true,grid:{color:'#f1f5f9'},ticks:{color:'#94a3b8',font:{size:11}}}}}
+  });
+})();
 </script>
 {% endblock %}
+

@@ -7,6 +7,7 @@ import torch.optim as optim
 import torch
 import torch.nn as nn
 import torch.nn.functional as fn
+from torch.optim.swa_utils import AveragedModel
 from data_preprocess import *
 from model.AMNTDDA import AMNTDDA
 from model.AMNTDDA_Fuzzy import AMNTDDA_Fuzzy
@@ -48,6 +49,18 @@ if __name__ == '__main__':
                         help='projection dim inside LearnableFuzzyLayer (prevents T-norm collapse)')
     parser.add_argument('--label_smoothing', type=float, default=0.0,
                         help='label smoothing for CrossEntropyLoss (e.g. 0.05 for gnn_fuzzy)')
+    parser.add_argument('--fuzzy_warmup', type=int, default=0,
+                        help='epochs to freeze fuzzy layer while backbone warms up (gnn_fuzzy only; 0=no warmup)')
+    parser.add_argument('--ortho_weight', type=float, default=0.0005,
+                        help='weight of orthogonal diversity loss on fuzzy centers (gnn_fuzzy only)')
+    parser.add_argument('--fuzzy_lr_ratio', type=float, default=0.1,
+                        help='LR of fuzzy params = backbone LR * fuzzy_lr_ratio (soft unfreeze, prevents gradient shock)')
+    parser.add_argument('--fuzzy_dropout', type=float, default=0.05,
+                        help='dropout rate on normalised firing strengths inside LearnableFuzzyLayer')
+    parser.add_argument('--sparse_weight', type=float, default=0.0,
+                        help='weight of L1 sparsity loss on pre-norm firing strengths (gnn_fuzzy only)')
+    parser.add_argument('--swa_start_ratio', type=float, default=0.7,
+                        help='SWA starts at this fraction of total epochs (e.g. 0.7 = epoch 700/1000)')
 
     args = parser.parse_args()
     args.data_dir = 'data/' + args.dataset + '/'
@@ -108,10 +121,37 @@ if __name__ == '__main__':
         else:
             model = AMNTDDA(args)
         model = model.to(device)
-        optimizer = optim.Adam(model.parameters(), weight_decay=args.weight_decay, lr=args.lr)
+        if args.model == 'gnn_fuzzy':
+            # ── Fix 2: Differential LR — fuzzy params get smaller LR so
+            #   backbone gradient is not shocked when fuzzy unfreezes.
+            fuzzy_param_ids = set()
+            for m in [model.fuzzy_layer, model.fuzzy_correction]:
+                fuzzy_param_ids.update(id(p) for p in m.parameters())
+            backbone_params = [p for p in model.parameters() if id(p) not in fuzzy_param_ids]
+            fuzzy_params    = [p for p in model.parameters() if id(p) in fuzzy_param_ids]
+            fuzzy_lr = args.lr * getattr(args, 'fuzzy_lr_ratio', 0.1)
+            optimizer = optim.Adam([
+                {'params': backbone_params, 'lr': args.lr},
+                {'params': fuzzy_params,    'lr': fuzzy_lr},
+            ], weight_decay=args.weight_decay)
+        else:
+            optimizer = optim.Adam(model.parameters(), weight_decay=args.weight_decay, lr=args.lr)
+
+        # Cả 2 model đều dùng fixed LR như paper gốc.
+        # ReduceLROnPlateau bị loại bỏ vì nó giảm LR xuống min_lr trước khi SWA
+        # kịp hoạt động (SWA cần LR đủ lớn để model dao động trong loss valley).
+        scheduler = None
 
         best_auc, best_aupr, best_accuracy, best_precision, best_recall, best_f1, best_mcc = 0, 0, 0, 0, 0, 0, 0
         best_epoch = 0
+
+        # ── SWA setup (gnn_fuzzy only) ────────────────────────────────
+        # AveragedModel smooths out noise when model oscillates in loss valley.
+        # No update_bn needed — model uses LayerNorm, not BatchNorm.
+        use_swa = (args.model == 'gnn_fuzzy')
+        if use_swa:
+            swa_model  = AveragedModel(model)
+            swa_start  = int(args.epochs * getattr(args, 'swa_start_ratio', 0.7))
         X_train = torch.LongTensor(data['X_train'][i]).to(device)
         Y_train = torch.LongTensor(data['Y_train'][i]).to(device)
         X_test = torch.LongTensor(data['X_test'][i]).to(device)
@@ -121,9 +161,46 @@ if __name__ == '__main__':
         drdipr_graph = drdipr_graph.to(device)
 
         for epoch in range(args.epochs):
+            # ── Cách 3: Two-stage warm-up ─────────────────────────
+            # Freeze fuzzy layer for first `fuzzy_warmup` epochs so the backbone
+            # (GT + HGT + Transformer) stabilises before fuzzy rules start learning.
+            fuzzy_active = True
+            if args.model == 'gnn_fuzzy':
+                warmup = getattr(args, 'fuzzy_warmup', 10)
+                fuzzy_active = (epoch >= warmup)
+                for p in model.fuzzy_layer.parameters():
+                    p.requires_grad_(fuzzy_active)
+                # Also freeze correction projection so backbone trains cleanly
+                if hasattr(model, 'fuzzy_correction'):
+                    model.fuzzy_correction.requires_grad_(fuzzy_active)
+
             model.train()
             _, train_score = model(drdr_graph, didi_graph, drdipr_graph, drug_feature, disease_feature, protein_feature, X_train)
             train_loss = cross_entropy(train_score, torch.flatten(Y_train))
+
+            # ── Cách 4: Orthogonal diversity loss ────────────────
+            # Push fuzzy rule centers apart so each rule covers a distinct
+            # drug-disease interaction pattern (avoids lazy/duplicate rules).
+            if args.model == 'gnn_fuzzy' and getattr(args, 'ortho_weight', 0.0) > 0 and fuzzy_active:
+                C = model.fuzzy_layer.centers                              # (R, proj_dim)
+                C_norm = fn.normalize(C, dim=-1)                          # unit vectors
+                R_size = C_norm.shape[0]
+                sim_mat = C_norm @ C_norm.T                                # (R, R) cosine sim
+                eye     = torch.eye(R_size, device=C.device)
+                ortho_loss = (sim_mat - eye).pow(2).mean()
+                train_loss = train_loss + args.ortho_weight * ortho_loss
+
+            # ── Cách 2: L1 Sparsity loss on pre-norm firing strengths ──
+            # raw_w is cached by LearnableFuzzyLayer.forward() during the
+            # training forward pass above — no extra computation needed.
+            # L1 on raw_w (NOT on w_norm): after Wang-Mendel sum(w̃)=1 always
+            # so L1(w̃) is a constant with zero gradient — useless.
+            if args.model == 'gnn_fuzzy' and getattr(args, 'sparse_weight', 0.0) > 0 and fuzzy_active:
+                raw_w = getattr(model.fuzzy_layer, '_last_raw_w', None)
+                if raw_w is not None:
+                    sparsity_loss = raw_w.mean()
+                    train_loss = train_loss + args.sparse_weight * sparsity_loss
+
             optimizer.zero_grad()
             train_loss.backward()
             optimizer.step()
@@ -141,6 +218,40 @@ if __name__ == '__main__':
             test_score = test_score.cpu().numpy()
 
             AUC, AUPR, accuracy, precision, recall, f1, mcc = get_metric(Y_test, test_score, test_prob)
+
+            # ── SWA: accumulate weights + evaluate averaged model ─────────
+            if use_swa and epoch >= swa_start:
+                swa_model.update_parameters(model)
+                with torch.no_grad():
+                    swa_model.eval()
+                    _, swa_score = swa_model(
+                        drdr_graph, didi_graph, drdipr_graph,
+                        drug_feature, disease_feature, protein_feature, X_test)
+                swa_prob = fn.softmax(swa_score, dim=-1)[:, 1].cpu().numpy()
+                swa_pred = torch.argmax(swa_score, dim=-1).cpu().numpy()
+                swa_auc, swa_aupr, swa_acc, swa_prec, swa_rec, swa_f1, swa_mcc = \
+                    get_metric(Y_test, swa_pred, swa_prob)
+                if swa_auc > best_auc:
+                    best_epoch = epoch + 1
+                    best_auc = swa_auc
+                    best_aupr, best_accuracy, best_precision, best_recall, best_f1, best_mcc = \
+                        swa_aupr, swa_acc, swa_prec, swa_rec, swa_f1, swa_mcc
+                    print(f'AUC improved (SWA) at epoch {best_epoch} ;\tbest_auc: {best_auc}')
+                    os.makedirs('web_app/models', exist_ok=True)
+                    torch.save({
+                        'model_state_dict': swa_model.module.state_dict(),
+                        'model_type': args.model,
+                        'fold': i,
+                        'epoch': best_epoch,
+                        'auc': best_auc,
+                        'args': args,
+                    }, args.checkpoint_path)
+                    import shutil
+                    shutil.copy2(args.checkpoint_path, args.checkpoint_path_legacy)
+
+            # ── ReduceLROnPlateau — step with current AUC (gnn_fuzzy only)
+            if scheduler is not None:
+                scheduler.step(AUC)
 
             end = timeit.default_timer()
             time = end - start

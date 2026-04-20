@@ -1,45 +1,81 @@
 {% extends 'base.html' %}
-{% block title %}Admin – Liên kết{% endblock %}
+{% block title %}Admin – Liên kết Thuốc–Bệnh{% endblock %}
+{% block page_title %}Liên kết đã biết{% endblock %}
+{% block breadcrumb %}
+  <li class="breadcrumb-item"><a href="{{ url_for('admin_dashboard') }}">Admin</a></li>
+  <li class="breadcrumb-item active">Liên kết</li>
+{% endblock %}
 {% block content %}
-<div class="d-flex justify-content-between align-items-center mb-4">
-  <h4 class="fw-bold mb-0"><i class="bi bi-link-45deg me-2 text-info"></i>Liên kết Thuốc–Bệnh đã biết</h4>
-  <span class="text-muted small">{{ total }} liên kết</span>
+
+<!-- Hero -->
+<div class="hero-banner mb-4 fade-in-up" style="background:linear-gradient(135deg,#0f172a 0%,#0c4a6e 40%,#0e7490 75%,#06b6d4 100%)">
+  <div class="d-flex align-items-center gap-3 position-relative" style="z-index:1">
+    <div style="width:52px;height:52px;border-radius:14px;background:rgba(255,255,255,.18);display:flex;align-items:center;justify-content:center;font-size:1.8rem"><i class="bi bi-link-45deg"></i></div>
+    <div>
+      <h4 class="fw-bold mb-1">Liên kết Thuốc–Bệnh đã biết</h4>
+      <p class="mb-0 opacity-75 small">Tổng cộng <strong>{{ total }}</strong> liên kết xác nhận trong cơ sở dữ liệu</p>
+    </div>
+  </div>
 </div>
 
 <!-- Filter -->
-<form class="mb-3 row g-2" method="GET">
-  <div class="col-sm-5">
-    <input type="text" name="drug" value="{{ drug_filter }}" class="form-control" placeholder="Lọc theo tên thuốc...">
-  </div>
-  <div class="col-sm-5">
-    <input type="text" name="disease" value="{{ disease_filter }}" class="form-control" placeholder="Lọc theo tên bệnh / OMIM...">
-  </div>
-  <div class="col-sm-2 d-flex gap-2">
-    <button type="submit" class="btn btn-primary flex-fill"><i class="bi bi-funnel"></i></button>
-    <a href="{{ url_for('admin_associations') }}" class="btn btn-outline-secondary flex-fill"><i class="bi bi-x"></i></a>
+<form class="mb-4 fade-in-up" method="GET" style="animation-delay:.05s">
+  <div class="card border-0 shadow-sm p-3" style="border-radius:16px">
+    <div class="row g-2 align-items-center">
+      <div class="col-sm-5">
+        <div class="input-group" style="border-radius:12px;overflow:hidden">
+          <span class="input-group-text" style="background:#f8fafc;border-right:none;border-color:#e2e8f0"><i class="bi bi-capsule text-success"></i></span>
+          <input type="text" name="drug" value="{{ drug_filter }}" class="form-control" placeholder="Lọc theo tên thuốc..." style="border-left:none;border-color:#e2e8f0">
+        </div>
+      </div>
+      <div class="col-sm-5">
+        <div class="input-group" style="border-radius:12px;overflow:hidden">
+          <span class="input-group-text" style="background:#f8fafc;border-right:none;border-color:#e2e8f0"><i class="bi bi-heart-pulse text-danger"></i></span>
+          <input type="text" name="disease" value="{{ disease_filter }}" class="form-control" placeholder="Lọc theo tên bệnh / OMIM..." style="border-left:none;border-color:#e2e8f0">
+        </div>
+      </div>
+      <div class="col-sm-2 d-flex gap-2">
+        <button type="submit" class="btn flex-fill fw-semibold" style="background:linear-gradient(135deg,#06b6d4,#0891b2);color:#fff;border:none;border-radius:10px"><i class="bi bi-funnel me-1"></i>Lọc</button>
+        <a href="{{ url_for('admin_associations') }}" class="btn btn-outline-secondary flex-fill" style="border-radius:10px" title="Xóa bộ lọc"><i class="bi bi-x-lg"></i></a>
+      </div>
+    </div>
   </div>
 </form>
 
-<div class="card border-0 shadow-sm">
+<!-- Table -->
+<div class="card border-0 shadow-sm fade-in-up" style="border-radius:16px;overflow:hidden;animation-delay:.1s">
   <div class="table-responsive">
-    <table class="table table-hover align-middle mb-0">
-      <thead class="table-light">
-        <tr>
-          <th>Thuốc (idx)</th><th>Tên thuốc</th>
-          <th>Bệnh (idx)</th><th>Tên bệnh</th><th>Mã OMIM</th>
+    <table class="table align-middle mb-0">
+      <thead>
+        <tr style="background:linear-gradient(135deg,#0f172a,#0c4a6e)">
+          <th style="padding:.9rem 1rem;color:#94a3b8;font-size:.72rem;letter-spacing:.7px;text-transform:uppercase;font-weight:600;border:none">Idx thuốc</th>
+          <th style="padding:.9rem 1rem;color:#94a3b8;font-size:.72rem;letter-spacing:.7px;text-transform:uppercase;font-weight:600;border:none">Tên thuốc</th>
+          <th style="padding:.9rem 1rem;color:#94a3b8;font-size:.72rem;letter-spacing:.7px;text-transform:uppercase;font-weight:600;border:none">Idx bệnh</th>
+          <th style="padding:.9rem 1rem;color:#94a3b8;font-size:.72rem;letter-spacing:.7px;text-transform:uppercase;font-weight:600;border:none">Tên bệnh</th>
+          <th style="padding:.9rem 1rem;color:#94a3b8;font-size:.72rem;letter-spacing:.7px;text-transform:uppercase;font-weight:600;border:none">Mã OMIM</th>
         </tr>
       </thead>
       <tbody>
         {% for row in rows %}
-        <tr>
-          <td><code>{{ row.drug_idx }}</code></td>
-          <td>{{ row.drug_name or '–' }}</td>
-          <td><code>{{ row.disease_idx }}</code></td>
-          <td>{{ row.disease_name or '–' }}</td>
-          <td><code>{{ row.omim_code or '–' }}</code></td>
+        <tr style="border-bottom:1px solid #f1f5f9;transition:background .12s" onmouseenter="this.style.background='#f8fafc'" onmouseleave="this.style.background=''">
+          <td style="padding:.75rem 1rem">
+            <span class="badge" style="background:linear-gradient(135deg,#10b981,#059669);font-size:.7rem;padding:.35rem .65rem;border-radius:7px;font-weight:600">{{ row.drug_idx }}</span>
+          </td>
+          <td style="padding:.75rem 1rem;font-weight:600;color:#1e293b">{{ row.drug_name or '–' }}</td>
+          <td style="padding:.75rem 1rem">
+            <span class="badge" style="background:linear-gradient(135deg,#ef4444,#dc2626);font-size:.7rem;padding:.35rem .65rem;border-radius:7px;font-weight:600">{{ row.disease_idx }}</span>
+          </td>
+          <td style="padding:.75rem 1rem;font-weight:600;color:#1e293b">{{ row.disease_name or '–' }}</td>
+          <td style="padding:.75rem 1rem">
+            {% if row.omim_code %}
+            <code style="background:#f1f5f9;padding:.2rem .5rem;border-radius:6px;font-size:.8rem;color:#0891b2">{{ row.omim_code }}</code>
+            {% else %}–{% endif %}
+          </td>
         </tr>
         {% else %}
-        <tr><td colspan="5" class="text-center py-4 text-muted">Không có dữ liệu phù hợp.</td></tr>
+        <tr><td colspan="5" class="text-center py-5 text-muted">
+          <i class="bi bi-inbox fs-2 d-block mb-2 opacity-50"></i>Không có dữ liệu phù hợp.
+        </td></tr>
         {% endfor %}
       </tbody>
     </table>

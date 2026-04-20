@@ -1,5 +1,10 @@
 {% extends 'base.html' %}
 {% block title %}Admin – Quản lý thuốc{% endblock %}
+{% block page_title %}Quản lý thuốc{% endblock %}
+{% block breadcrumb %}
+  <li class="breadcrumb-item"><a href="{{ url_for('admin_dashboard') }}">Admin</a></li>
+  <li class="breadcrumb-item active">Thuốc</li>
+{% endblock %}
 {% block content %}
 
 <div class="hero-banner mb-4 fade-in-up" style="background:linear-gradient(135deg,#0f172a 0%,#064e3b 50%,#065f46 100%)">
@@ -83,27 +88,27 @@
   <div class="modal-dialog">
     <form method="POST" id="editForm">
       <div class="modal-content">
-        <div class="modal-header">
-          <h5 class="modal-title"><i class="bi bi-pencil me-2"></i>Chỉnh sửa thuốc</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        <div class="modal-header" style="background:linear-gradient(135deg,#0f172a,#064e3b);color:#fff;border-radius:12px 12px 0 0">
+          <h5 class="modal-title"><i class="bi bi-capsule me-2" style="color:#34d399"></i>Chỉnh sửa thuốc</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
         </div>
-        <div class="modal-body">
+        <div class="modal-body" style="padding:1.5rem">
           <div class="mb-3">
-            <label class="form-label fw-semibold">Tên thuốc</label>
-            <input type="text" name="name" id="edit-name" class="form-control" required>
+            <label class="form-label fw-semibold small text-uppercase" style="color:#64748b;letter-spacing:.5px">Tên thuốc</label>
+            <input type="text" name="name" id="edit-name" class="form-control" required style="border-radius:10px;border-color:#e2e8f0">
           </div>
           <div class="mb-3">
-            <label class="form-label fw-semibold">SMILES</label>
-            <input type="text" name="smiles" id="edit-smiles" class="form-control" placeholder="SMILES string">
+            <label class="form-label fw-semibold small text-uppercase" style="color:#64748b;letter-spacing:.5px">SMILES</label>
+            <input type="text" name="smiles" id="edit-smiles" class="form-control" placeholder="SMILES string" style="border-radius:10px;border-color:#e2e8f0;font-family:monospace;font-size:.85rem">
           </div>
           <div class="mb-3">
-            <label class="form-label fw-semibold">Mô tả</label>
-            <textarea name="description" id="edit-desc" class="form-control" rows="3"></textarea>
+            <label class="form-label fw-semibold small text-uppercase" style="color:#64748b;letter-spacing:.5px">Mô tả</label>
+            <textarea name="description" id="edit-desc" class="form-control" rows="3" style="border-radius:10px;border-color:#e2e8f0"></textarea>
           </div>
         </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Hủy</button>
-          <button type="submit" class="btn btn-primary">Lưu thay đổi</button>
+        <div class="modal-footer" style="border-top:1px solid #f1f5f9;padding:1rem 1.5rem">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal" style="border-radius:10px">Hủy</button>
+          <button type="submit" class="btn fw-semibold" style="background:linear-gradient(135deg,#10b981,#059669);color:#fff;border:none;border-radius:10px;padding:.5rem 1.5rem"><i class="bi bi-check-lg me-1"></i>Lưu thay đổi</button>
         </div>
       </div>
     </form>

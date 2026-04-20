@@ -289,35 +289,42 @@ class Database:
             return conn.execute('SELECT COUNT(*) FROM predictions').fetchone()[0]
 
     def get_statistics(self):
+        def _to_dicts(rows):
+            return [dict(r) for r in rows]
+
         with self.get_connection() as conn:
             stats = {}
-            stats['predictions_per_day'] = conn.execute('''
+            stats['predictions_per_day'] = _to_dicts(conn.execute('''
                 SELECT DATE(created_at) as date, COUNT(*) as count
                 FROM predictions
                 WHERE created_at >= DATE('now', '-30 days')
                 GROUP BY DATE(created_at) ORDER BY date
-            ''').fetchall()
-            stats['top_drugs'] = conn.execute('''
+            ''').fetchall())
+            stats['top_drugs'] = _to_dicts(conn.execute('''
                 SELECT query_name, COUNT(*) as count FROM predictions
                 WHERE query_type='drug' GROUP BY query_name ORDER BY count DESC LIMIT 10
-            ''').fetchall()
-            stats['top_diseases'] = conn.execute('''
+            ''').fetchall())
+            stats['top_diseases'] = _to_dicts(conn.execute('''
                 SELECT query_name, COUNT(*) as count FROM predictions
                 WHERE query_type='disease' GROUP BY query_name ORDER BY count DESC LIMIT 10
-            ''').fetchall()
-            stats['by_type'] = conn.execute('''
+            ''').fetchall())
+            stats['by_type'] = _to_dicts(conn.execute('''
                 SELECT query_type, COUNT(*) as count FROM predictions GROUP BY query_type
-            ''').fetchall()
-            stats['per_user'] = conn.execute('''
+            ''').fetchall())
+            stats['per_user'] = _to_dicts(conn.execute('''
                 SELECT u.username, COUNT(p.id) as count
                 FROM users u LEFT JOIN predictions p ON p.user_id = u.id
                 GROUP BY u.id ORDER BY count DESC LIMIT 10
-            ''').fetchall()
-            stats['recent_predictions'] = conn.execute('''
+            ''').fetchall())
+            stats['recent_predictions'] = _to_dicts(conn.execute('''
                 SELECT p.id, p.query_type, p.query_name, p.created_at, u.username
                 FROM predictions p LEFT JOIN users u ON u.id = p.user_id
                 ORDER BY p.created_at DESC LIMIT 10
-            ''').fetchall()
+            ''').fetchall())
+            stats['total_predictions'] = conn.execute(
+                'SELECT COUNT(*) FROM predictions').fetchone()[0]
+            stats['active_users'] = conn.execute(
+                'SELECT COUNT(DISTINCT user_id) FROM predictions').fetchone()[0]
             return stats
 
     def import_proteins(self, proteins_list):
