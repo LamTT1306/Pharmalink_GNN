@@ -65,6 +65,40 @@ def data_processing(data, args):
                 one_index.append([i, j])
             else:
                 zero_index.append([i, j])
+
+    # ── Bước 2: Cách ly "Fake Negatives" (ignore list) ───────────────────────
+    # Nếu tồn tại file suspect_pairs.csv (tạo bởi scan_fake_negatives.py),
+    # chỉ loại bỏ các cặp có combined_score >= suspect_score_thr (mặc định 0.25)
+    # khỏi zero_index TRƯỚC khi lấy mẫu.
+    #
+    # Tại sao cần ngưỡng combined_score?
+    #   Nếu drug_thr/dis_thr rất thấp, nhiều cặp có bằng chứng yếu vẫn lọt vào
+    #   suspect_pairs.csv. Loại toàn bộ sẽ xóa nhầm true negatives. Chỉ cách ly
+    #   cặp có bằng chứng đủ mạnh (combined_score cao) mới an toàn cho training.
+    suspect_path = os.path.join(args.data_dir, 'suspect_pairs.csv')
+    # Lấy ngưỡng combined_score từ args (hoặc mặc định 0.25)
+    suspect_score_thr = getattr(args, 'suspect_score_thr', 0.25)
+    n_before = len(zero_index)
+    if os.path.exists(suspect_path):
+        suspect_df = pd.read_csv(suspect_path)
+        # Lọc chỉ giữ cặp đủ mạnh để cách ly khỏi training
+        if 'combined_score' in suspect_df.columns:
+            high_conf = suspect_df[suspect_df['combined_score'] >= suspect_score_thr]
+        else:
+            high_conf = suspect_df   # fallback nếu file cũ không có cột này
+        suspect_set = set(
+            zip(high_conf['drug_idx'].astype(int), high_conf['disease_idx'].astype(int))
+        )
+        zero_index = [p for p in zero_index if tuple(p) not in suspect_set]
+        n_removed = n_before - len(zero_index)
+        print(f'[data_processing] Đã cách ly {n_removed:,}/{len(suspect_df):,} cặp nghi vấn '
+              f'(combined_score >= {suspect_score_thr}) khỏi training '
+              f'({n_before:,} → {len(zero_index):,} âm tính sạch).')
+        # Toàn bộ suspects (không lọc) dùng cho Drug Repurposing (Bước 3)
+        data['suspect_pairs'] = suspect_df[['drug_idx', 'disease_idx']].to_numpy(dtype=int)
+    else:
+        data['suspect_pairs'] = np.empty((0, 2), dtype=int)
+
     random.seed(args.random_seed)
     random.shuffle(one_index)
     random.shuffle(zero_index)

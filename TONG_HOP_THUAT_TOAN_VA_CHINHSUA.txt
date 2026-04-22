@@ -1,0 +1,621 @@
+================================================================================
+     TỔNG HỢP THUẬT TOÁN, CÔNG THỨC TOÁN HỌC VÀ CÁC CHỈNH SỬA
+     Dự án: MedLink AI — Dự đoán liên kết Thuốc–Bệnh (FuzzyGCN)
+================================================================================
+
+MỤC LỤC
+--------
+  PHẦN 1 — KIẾN TRÚC TỔNG THỂ CỦA MÔ HÌNH
+  PHẦN 2 — CÁC THUẬT TOÁN VÀ CÔNG THỨC TOÁN HỌC
+    2.1  Tầng Fuzzy đa kênh (LopFuzzy)
+    2.2  Trọng số cạnh Gaussian RBF
+    2.3  Graph Convolutional Network (GCN)
+    2.4  Residual Connection + LayerNorm
+    2.5  Bộ giải mã MLP Bilinear
+    2.6  Hàm mất mát Binary Cross-Entropy
+    2.7  K-Fold Cross Validation
+    2.8  Negative Sampling
+    2.9  Các chỉ số đánh giá
+  PHẦN 3 — CÁC CHỈNH SỬA ĐÃ THỰC HIỆN
+    3.1  Tóm tắt nhanh
+    3.2  Chi tiết từng thay đổi
+
+================================================================================
+PHẦN 1 — KIẾN TRÚC TỔNG THỂ CỦA MÔ HÌNH
+================================================================================
+
+Bài toán: Cho N_d thuốc và N_p bệnh, dự đoán xem cặp (thuốc d, bệnh p) có
+liên kết với nhau hay không (bài toán phân loại nhị phân trên đồ thị).
+
+Luồng xử lý (pipeline):
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  INPUT                                                                  │
+  │    x_drug    ∈ ℝ^{N_d × D_drug}    (fingerprint phân tử thuốc)         │
+  │    x_disease ∈ ℝ^{N_p × D_disease} (đặc trưng bệnh từ ontology/GIP)   │
+  └──────────────────────────┬──────────────────────────────────────────────┘
+                             │
+                             ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  BƯỚC 1: MÃ HÓA + FUZZY (riêng biệt theo loại nút)                     │
+  │    z_drug    = LopFuzzy_thuoc( Linear_drug(x_drug) )                   │
+  │    z_disease = LopFuzzy_benh( Linear_disease(x_disease) )              │
+  └──────────────────────────┬──────────────────────────────────────────────┘
+                             │
+                             ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  BƯỚC 2: XÂY DỰNG ĐỒ THỊ ĐỒNG NHẤT                                    │
+  │    H^(0) = stack([z_drug; z_disease]) ∈ ℝ^{(N_d+N_p) × d_hidden}      │
+  │    w_ij  = exp(-(1 - cos(h_i, h_j))^2 / 2)   ← trọng số cạnh          │
+  └──────────────────────────┬──────────────────────────────────────────────┘
+                             │
+                             ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  BƯỚC 3: RESIDUAL GCN (L=3 lớp)                                        │
+  │    l = 0, 1: H^(l+1) = LayerNorm( ELU(GCN(H^(l), w)) + H^(l) )       │
+  │    l = 2:    H^(L)   = GCN(H^(L-1), w)   ← lớp cuối, không residual   │
+  └──────────────────────────┬──────────────────────────────────────────────┘
+                             │
+                             ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  BƯỚC 4: GIẢI MÃ MLP BILINEAR                                          │
+  │    z_pair = [ e_d ∥ e_p ∥ e_d ⊙ e_p ] ∈ ℝ^{3·d_out}                 │
+  │    score  = Linear( ELU( Linear(z_pair) ) )  ∈ ℝ                      │
+  │    prob   = sigmoid(score) ∈ (0, 1)                                    │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+Ký hiệu:
+  N_d, N_p   — số lượng thuốc, bệnh
+  D_drug     — số chiều đặc trưng thuốc (ví dụ: 1024 bits fingerprint)
+  D_disease  — số chiều đặc trưng bệnh (ví dụ: 64 chiều GIP)
+  d_hidden   — chiều ẩn (mặc định 192)
+  d_out      — chiều đầu ra GCN (mặc định 96)
+  ∥          — ghép nối vector (concatenation)
+  ⊙          — tích element-wise (Hadamard product)
+
+
+================================================================================
+PHẦN 2 — CÁC THUẬT TOÁN VÀ CÔNG THỨC TOÁN HỌC
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+2.1  TẦNG FUZZY ĐA KÊNH (LopFuzzy)
+────────────────────────────────────────────────────────────────────────────────
+
+MỤC ĐÍCH: Lọc nhiễu trong đặc trưng đầu vào. Thay vì truyền thẳng x qua mạng,
+ta nhân x với "mức độ chắc chắn" của từng chiều — nếu giá trị x_i lệch xa
+trung tâm μ_i thì bị giảm trọng số → mạng ít bị nhiễu chi phối.
+
+─── Hàm thành viên Gaussian ────────────────────────────────────────────────────
+
+  m_gauss_i(x_i) = exp( -(x_i - μ_i)^2 / (2·σ_i^2) )
+
+  Ký hiệu:
+    x_i   — giá trị chiều thứ i của đặc trưng đầu vào
+    μ_i   — tâm học được (giá trị "bình thường" của chiều i)
+    σ_i   — độ rộng (softplus(log_σ_i) + ε để luôn dương)
+    exp() — hàm mũ tự nhiên
+
+  Giá trị: m_gauss ∈ (0, 1]
+    → m_gauss = 1.0 khi x_i = μ_i  (hoàn toàn thuộc tập)
+    → m_gauss → 0  khi |x_i - μ_i| >> σ_i  (gần như không thuộc tập)
+
+  Ví dụ trực quan:
+    Giả sử fingerprint thuốc A có bit thứ 5 = 0.8, μ_5 = 0.5, σ_5 = 0.3:
+      m_gauss_5 = exp(-(0.8-0.5)^2 / (2·0.09)) = exp(-0.09/0.18) = exp(-0.5) ≈ 0.606
+    → Chiều 5 được giữ lại 60.6% giá trị.
+
+─── Hàm thành viên Tam giác (Triangular) ────────────────────────────────────────
+
+  m_tri_i(x_i) = max(0,  1 - |x_i - μ_i| / σ_i)
+
+  Ký hiệu:
+    |·|  — giá trị tuyệt đối
+    max  — lấy giá trị lớn hơn
+
+  Giá trị: m_tri ∈ [0, 1]
+    → m_tri = 1.0 khi x_i = μ_i
+    → m_tri = 0.0 khi |x_i - μ_i| ≥ σ_i  (cứng hơn Gaussian)
+
+  Ví dụ: Cùng ví dụ trên:
+    m_tri_5 = max(0, 1 - 0.3/0.3) = max(0, 1 - 1.0) = 0.0
+    → Chiều 5 bị triệt tiêu hoàn toàn theo tam giác (vì lệch đúng 1σ).
+
+─── Kết hợp có học (Learnable Blending) ─────────────────────────────────────────
+
+  α      = sigmoid(α₀)     ∈ (0, 1)   — tỉ lệ pha trộn (tham số học)
+  m_i    = α · m_gauss_i + (1-α) · m_tri_i
+
+  Đầu ra:
+  LopFuzzy(x)_i = x_i · m_i(x_i)
+
+  Ví dụ: Nếu α = 0.7 (mô hình học ra):
+    m_5 = 0.7 × 0.606 + 0.3 × 0.0 = 0.424
+    LopFuzzy(x)_5 = 0.8 × 0.424 = 0.339  (thay vì dùng 0.8 nguyên)
+
+  Tại sao cần cả hai?
+    - Gaussian: trơn, gradient liên tục → dễ tối ưu
+    - Triangular: cứng hơn, không bị nhiễu xa tâm → kháng outlier tốt hơn
+    - Kết hợp: tận dụng ưu điểm cả hai, α tự học phù hợp với dữ liệu
+
+  Tại sao σ = softplus(log_σ) + ε?
+    softplus(x) = ln(1 + e^x) ≥ 0, luôn dương, gradient mượt khi x nhỏ.
+    Dùng log_σ làm tham số → σ không bao giờ âm, tránh lỗi chia cho 0.
+
+
+────────────────────────────────────────────────────────────────────────────────
+2.2  TRỌNG SỐ CẠNH GAUSSIAN RBF
+────────────────────────────────────────────────────────────────────────────────
+
+MỤC ĐÍCH: Gán trọng số cho từng cạnh trong đồ thị — cặp nút nào có embedding
+giống nhau sẽ ảnh hưởng nhau nhiều hơn khi lan truyền GCN.
+
+  cos_ij = cos_similarity(h_i, h_j)
+         = (h_i · h_j) / (‖h_i‖ · ‖h_j‖)   ∈ [-1, 1]
+
+  w_ij   = exp( -(1 - cos_ij)^2 / 2 )        ∈ (0, 1]
+
+  Ký hiệu:
+    h_i, h_j    — embedding của nút i và j
+    h_i · h_j   — tích vô hướng (dot product)
+    ‖h_i‖       — độ dài (norm) của vector h_i
+    cos_ij      — độ tương đồng cosine
+
+  Ví dụ trực quan:
+    • Nếu h_i và h_j gần song song (rất giống nhau): cos = 0.95
+        w = exp(-(1-0.95)^2/2) = exp(-0.00125) ≈ 0.999  → ảnh hưởng rất mạnh
+    • Nếu h_i và h_j vuông góc (không liên quan): cos = 0.0
+        w = exp(-(1-0)^2/2) = exp(-0.5) ≈ 0.607  → ảnh hưởng trung bình
+    • Nếu h_i và h_j ngược chiều (hoàn toàn khác nhau): cos = -1.0
+        w = exp(-(1-(-1))^2/2) = exp(-2) ≈ 0.135  → ảnh hưởng yếu
+
+  Tại sao dùng (1 - cos) thay vì cos trực tiếp?
+    → (1 - cos) là "khoảng cách" cosine, = 0 khi giống nhau, = 2 khi ngược chiều.
+    → Dùng Gaussian RBF trên khoảng cách → trọng số giảm mượt theo khoảng cách.
+
+
+────────────────────────────────────────────────────────────────────────────────
+2.3  GRAPH CONVOLUTIONAL NETWORK (GCN)
+────────────────────────────────────────────────────────────────────────────────
+
+MỤC ĐÍCH: Lan truyền thông tin trong đồ thị — mỗi nút thu thập và tổng hợp
+thông tin từ các láng giềng của nó.
+
+Công thức GCN chuẩn (Kipf & Welling, 2017):
+
+  H^(l+1) = σ( D̂^{-1/2} · Â · D̂^{-1/2} · H^(l) · W^(l) )
+
+  Với trọng số cạnh w_ij (có thêm edge_weight):
+
+  H^(l+1)_i = σ( Σ_{j ∈ N(i)∪{i}}  w_ij / (d_i · d_j)^{1/2}  · H^(l)_j · W^(l) )
+
+  Ký hiệu:
+    H^(l)    — ma trận embedding tại lớp l, kích thước [N × d^(l)]
+    W^(l)    — ma trận trọng số học được tại lớp l, kích thước [d^(l) × d^(l+1)]
+    N(i)     — tập láng giềng của nút i
+    w_ij     — trọng số cạnh (từ Gaussian RBF ở trên)
+    d_i      — bậc nút i (số láng giềng + 1)
+    Â        — ma trận kề đã thêm vòng lặp (self-loop): Â = A + I
+    D̂        — ma trận bậc chuẩn hóa của Â
+    σ        — hàm kích hoạt (ELU trong dự án này)
+
+  Ví dụ trực quan (3 nút):
+    Đồ thị: thuốc A — bệnh X — thuốc B
+    Khi cập nhật embedding của bệnh X:
+      H_X^(1) = W · (w_{AX}/√(d_A·d_X) · H_A + w_{XX}/d_X · H_X + w_{BX}/√(d_B·d_X) · H_B)
+    → Bệnh X "học" được đặc trưng từ cả hai thuốc A và B mà nó liên kết với.
+
+  Trong dự án dùng GCNConv của PyTorch Geometric:
+    - Tự động tính D̂^{-1/2} Â D̂^{-1/2}
+    - Truyền edge_weight=w_ij để tích hợp trọng số Gaussian RBF
+
+
+────────────────────────────────────────────────────────────────────────────────
+2.4  RESIDUAL CONNECTION + LAYER NORMALIZATION
+────────────────────────────────────────────────────────────────────────────────
+
+MỤC ĐÍCH: Ngăn vấn đề "over-smoothing" — khi GCN nhiều lớp, các nút dần hội
+tụ về cùng một embedding và mất đặc trưng riêng.
+
+─── Residual Connection (skip connection) ────────────────────────────────────
+
+  h^(l+1) = ELU(GCN(h^(l))) + h^(l)    (chỉ áp dụng khi dim đầu vào = dim đầu ra)
+
+  Ý tưởng: Thêm "đường tắt" từ đầu vào sang đầu ra → gradient chảy thẳng về
+  đầu, không bị mất (vanishing gradient). Tương tự ResNet trong thị giác máy tính.
+
+  Ví dụ: Nếu GCN học ra Δh tốt:
+    h^(1) = Δh + h^(0)   → "cải thiện dần" thay vì "thay thế hoàn toàn"
+
+─── ELU (Exponential Linear Unit) ────────────────────────────────────────────
+
+        ⎧ x           nếu x ≥ 0
+  ELU = ⎨
+        ⎩ e^x - 1     nếu x < 0    → âm nhỏ thay vì = 0 (như ReLU)
+
+  Ưu điểm so với ReLU: gradient không bị triệt tiêu ở vùng âm → học ổn định hơn.
+
+─── Layer Normalization ────────────────────────────────────────────────────────
+
+  LayerNorm(h)_i = γ_i · (h_i - μ_h) / √(σ_h^2 + ε) + β_i
+
+  Ký hiệu:
+    μ_h      — trung bình của h qua tất cả chiều của một nút
+    σ_h^2    — phương sai
+    γ_i, β_i — tham số học được (scale và shift)
+    ε        — hằng số nhỏ tránh chia cho 0 (ví dụ: 1e-5)
+
+  Ví dụ: Nếu h = [3.0, -1.0, 0.5], μ_h = 0.833, σ_h = 1.70
+    → Chuẩn hóa về khoảng [-1.5, 1.5] trước khi nhân γ, cộng β
+    → Gradient ổn định, không explode hay vanish
+
+  Công thức kết hợp đầy đủ mỗi lớp ẩn l (l < L-1):
+    h̃^(l)   = GCNConv(h^(l), E, w)
+    h^(l+1) = LayerNorm( ELU(h̃^(l)) + h^(l) )    ← residual
+
+  Lớp cuối l = L-1:
+    h^(L) = GCNConv(h^(L-1), E, w)    ← không residual, không activation
+
+
+────────────────────────────────────────────────────────────────────────────────
+2.5  BỘ GIẢI MÃ MLP BILINEAR
+────────────────────────────────────────────────────────────────────────────────
+
+MỤC ĐÍCH: Từ embedding e_d (thuốc) và e_p (bệnh), dự đoán xác suất liên kết.
+
+Bước 1 — Tạo vector cặp (pair feature):
+  z = [ e_d  ‖  e_p  ‖  e_d ⊙ e_p ]  ∈ ℝ^{3·d_out}
+
+  Ký hiệu:
+    e_d     — embedding thuốc d (lấy từ đầu ra GCN), chiều d_out
+    e_p     — embedding bệnh p, chiều d_out
+    ‖       — ghép nối (concatenation): [v1, v2, v3]
+    ⊙       — tích element-wise: (e_d ⊙ e_p)_i = e_d_i × e_p_i
+
+  Tại sao cần cả 3 thành phần?
+    • e_d: đặc trưng riêng của thuốc
+    • e_p: đặc trưng riêng của bệnh
+    • e_d ⊙ e_p: tương tác giữa thuốc và bệnh (mô hình hóa quan hệ)
+    → Tốt hơn chỉ dùng tích vô hướng (dot product) vốn là scalar
+
+Bước 2 — Tính điểm qua MLP:
+  score = Linear(d_out→1)( ELU( Dropout( Linear(3·d_out→d_out)(z) ) ) )
+
+Bước 3 — Chuyển thành xác suất:
+  prob = sigmoid(score) = 1 / (1 + e^{-score}) ∈ (0, 1)
+
+  Ví dụ trực quan:
+    score = 2.0  → prob = 1/(1+e^{-2}) ≈ 0.88  → 88% khả năng liên kết
+    score = -1.5 → prob = 1/(1+e^{1.5}) ≈ 0.18 → 18% khả năng liên kết
+    score = 0.0  → prob = 0.5                   → không chắc (50/50)
+
+
+────────────────────────────────────────────────────────────────────────────────
+2.6  HÀM MẤT MÁT: BINARY CROSS-ENTROPY WITH LOGITS
+────────────────────────────────────────────────────────────────────────────────
+
+  BCE(y, ŷ) = -[y·log(σ(ŷ)) + (1-y)·log(1-σ(ŷ))]
+
+  Ký hiệu:
+    y      — nhãn thực tế: 1 (có liên kết) hoặc 0 (không liên kết)
+    ŷ      — điểm logit (score trước sigmoid) từ MLP
+    σ(ŷ)   — sigmoid(ŷ) = xác suất dự đoán
+    log    — logarithm tự nhiên
+
+  "With Logits" nghĩa là: tính trực tiếp từ score, không qua sigmoid trước
+  → Ổn định số hơn vì tránh log(0) hoặc log(1) gây inf/nan.
+
+  Ví dụ:
+    Nếu y=1 (có liên kết), ŷ=2.0:  σ(2.0)=0.88 → BCE = -log(0.88) ≈ 0.13
+    Nếu y=0 (không liên kết), ŷ=2.0: BCE = -log(1-0.88) = -log(0.12) ≈ 2.12
+    → Phạt nặng khi dự đoán sai với độ tin cậy cao.
+
+  Optimizer: Adam với learning_rate=5e-4, weight_decay=2e-4
+    → Adam: điều chỉnh learning rate riêng cho từng tham số dựa trên gradient
+    → weight_decay: L2 regularization, ngăn overfitting
+
+
+────────────────────────────────────────────────────────────────────────────────
+2.7  K-FOLD CROSS VALIDATION (Stratified)
+────────────────────────────────────────────────────────────────────────────────
+
+MỤC ĐÍCH: Đánh giá mô hình khách quan hơn, không bị phụ thuộc vào 1 lần chia.
+
+Quy trình:
+  1. Gộp tất cả cạnh dương (positive edges) + cạnh âm (negative edges)
+  2. Chia thành K=10 phần đều nhau (StratifiedKFold đảm bảo tỉ lệ dương/âm đều nhau)
+  3. Lần lượt chạy K lần huấn luyện:
+     - Fold i: dùng phần i làm test, K-1 phần còn lại làm train
+  4. Tính trung bình và độ lệch chuẩn của các chỉ số qua K lần
+
+  Stratified: đảm bảo mỗi fold có cùng tỉ lệ nhãn dương/âm → đánh giá không lệch.
+
+  Ví dụ với K=10:
+    • 100 cạnh dương + 120 cạnh âm = 220 mẫu
+    • Mỗi fold: ~22 mẫu test (khoảng 10 dương, 12 âm)
+    • Train trên 198 mẫu, test trên 22 mẫu → lặp lại 10 lần
+
+  Kết quả cuối:
+    AUC_mean = mean(AUC_1, ..., AUC_10)
+    AUC_std  = std(AUC_1, ..., AUC_10)    ← ddof=1 (unbiased)
+
+
+────────────────────────────────────────────────────────────────────────────────
+2.8  NEGATIVE SAMPLING
+────────────────────────────────────────────────────────────────────────────────
+
+MỤC ĐÍCH: Tạo các cặp (thuốc, bệnh) âm tính (không có liên kết thực sự) để
+cân bằng dữ liệu huấn luyện.
+
+Quy trình:
+  1. Xây dựng tập dương: tap_duong = {(d, p) | tồn tại liên kết d-p}
+  2. Lấy mẫu ngẫu nhiên cặp (d', p') ∉ tap_duong cho đến khi đủ số lượng
+  3. Tỉ lệ: so_am = round(so_duong × ti_le_am)   — ti_le_am = 1.2 (mặc định)
+
+  Ví dụ:
+    200 cặp dương × 1.2 = 240 cặp âm → tổng 440 mẫu, cân bằng hơn là 1:1
+
+  Kỹ thuật tối ưu tốc độ: lấy mẫu nhiều lần một lúc (batch 2048+), lọc trùng.
+
+
+────────────────────────────────────────────────────────────────────────────────
+2.9  CÁC CHỈ SỐ ĐÁNH GIÁ
+────────────────────────────────────────────────────────────────────────────────
+
+Tất cả tính trên tập test (cạnh không thấy khi huấn luyện):
+
+┌────────────┬──────────────────────────────────────────────────────────────┐
+│ Chỉ số     │ Công thức                                                    │
+├────────────┼──────────────────────────────────────────────────────────────┤
+│ AUC        │ Area Under ROC Curve = P(score_dương > score_âm)             │
+│            │ ∈ [0,1], càng cao càng tốt (1.0 = hoàn hảo, 0.5 = ngẫu nhiên)│
+├────────────┼──────────────────────────────────────────────────────────────┤
+│ AUPR       │ Area Under Precision-Recall Curve                            │
+│            │ Tốt hơn AUC khi dữ liệu mất cân bằng nhiều                  │
+├────────────┼──────────────────────────────────────────────────────────────┤
+│ Accuracy   │ (TP + TN) / (TP + TN + FP + FN)                             │
+│            │ Tỉ lệ dự đoán đúng                                           │
+├────────────┼──────────────────────────────────────────────────────────────┤
+│ Precision  │ TP / (TP + FP)                                               │
+│            │ Trong số dự đoán "có liên kết", bao nhiêu % đúng thực sự     │
+├────────────┼──────────────────────────────────────────────────────────────┤
+│ Recall     │ TP / (TP + FN)                                               │
+│            │ Trong số liên kết thực, bao nhiêu % được tìm ra              │
+├────────────┼──────────────────────────────────────────────────────────────┤
+│ F1         │ 2 × Precision × Recall / (Precision + Recall)                │
+│            │ Trung bình điều hòa của Precision và Recall                  │
+├────────────┼──────────────────────────────────────────────────────────────┤
+│ MCC        │ (TP·TN - FP·FN) / √((TP+FP)(TP+FN)(TN+FP)(TN+FN))          │
+│            │ Chỉ số cân bằng nhất, ∈ [-1, 1], không bị lệch bởi imbalance│
+└────────────┴──────────────────────────────────────────────────────────────┘
+
+  Ký hiệu:
+    TP — True Positive:  dự đoán "có liên kết" và đúng thực sự
+    TN — True Negative:  dự đoán "không liên kết" và đúng
+    FP — False Positive: dự đoán "có liên kết" nhưng sai
+    FN — False Negative: dự đoán "không liên kết" nhưng sai
+
+  Ví dụ trực quan (100 mẫu: 50 dương, 50 âm):
+    TP=45, TN=40, FP=10, FN=5
+    Precision = 45/(45+10) = 81.8%
+    Recall    = 45/(45+5)  = 90.0%
+    F1        = 2×0.818×0.9/(0.818+0.9) = 85.7%
+    MCC       = (45×40 - 10×5) / √(55×50×50×45) ≈ 0.716
+
+
+================================================================================
+PHẦN 3 — CÁC CHỈNH SỬA ĐÃ THỰC HIỆN
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+3.1  TÓM TẮT NHANH (tổng quan)
+────────────────────────────────────────────────────────────────────────────────
+
+  #  │ Nội dung                              │ File bị ảnh hưởng
+ ────┼───────────────────────────────────────┼─────────────────────────────────
+  1  │ Chuyển "So sánh Model" từ user.py     │ user.py, admin.py
+     │ sang trang admin (tab mới "📊 Model") │
+  2  │ Thêm endpoint tính lại metrics        │ routes.py, schemas.py
+     │ /admin/model/recalculate              │ api_client.py
+  3  │ Sửa lỗi 'so_chieu_an' không tồn tại  │ routes.py
+  4  │ Sửa folder picker → file picker JSON  │ admin.py, routes.py
+  5  │ Sửa FuzzyGCN size mismatch 192 vs 256 │ routes.py
+  6  │ Đơn giản hóa UI chọn file so sánh    │ admin.py
+  7  │ Thêm bảng thông số song song chi tiết │ admin.py
+
+────────────────────────────────────────────────────────────────────────────────
+3.2  CHI TIẾT TỪNG THAY ĐỔI
+────────────────────────────────────────────────────────────────────────────────
+
+══════════════════════════════════════════════════════════════════════════════
+THAY ĐỔI 1: Chuyển "So sánh Model" từ user.py → admin.py (tab mới)
+══════════════════════════════════════════════════════════════════════════════
+
+  Vấn đề: Chức năng so sánh mô hình đang nằm trong trang người dùng (Tab E),
+  không phù hợp vì đây là chức năng của quản trị viên.
+
+  Giải pháp:
+  • src/frontend/app/pages/user.py:
+    - Xóa Tab E "So sánh Model"
+    - Còn lại 4 tab: A (Dự đoán), B (Duyệt liên kết), C (Tra cứu), D (Lịch sử)
+    - Dòng thay đổi:
+        TRƯỚC: tab_a, tab_b, tab_c, tab_d, tab_e = st.tabs([...5 tabs...])
+        SAU:   tab_a, tab_b, tab_c, tab_d = st.tabs([...4 tabs...])
+
+  • src/frontend/app/pages/admin.py:
+    - Thêm tab_model = "📊 Model" vào danh sách tab admin
+    - Di chuyển toàn bộ code so sánh sang đây
+    - Thêm section hiển thị metrics hiện tại (AUC, AUPR, v.v.) với màu sắc
+
+══════════════════════════════════════════════════════════════════════════════
+THAY ĐỔI 2: Endpoint /admin/model/recalculate
+══════════════════════════════════════════════════════════════════════════════
+
+  Vấn đề: File kfold_metrics.json (được lưu sau huấn luyện) chỉ có giá trị
+  trung bình, không có std. Admin cần có thể tính lại từ dữ liệu gốc.
+
+  Giải pháp — thêm 3 file:
+
+  • src/backend/app/schemas.py — Thêm model Pydantic:
+      class AdminRecalcRequest(BaseModel):
+          dataset: str = Field(min_length=1)
+
+  • src/backend/app/api/routes.py — Thêm endpoint:
+      @router.post("/admin/model/recalculate")
+      def admin_recalculate_metrics(payload: AdminRecalcRequest, ...):
+          # Fast path: nếu JSON đã có trường "folds" → tính ngay mean/std
+          # Slow path: đọc từng best_fold_{n}.pth → chạy eval → tổng hợp
+
+  • src/frontend/app/services/api_client.py — Thêm method:
+      def admin_recalculate_metrics(self, dataset: str) -> dict:
+          return self._post("/admin/model/recalculate", {"dataset": dataset})
+
+  Nút "🔁 Tính lại từ weights" trên UI → gọi endpoint này → cập nhật metrics.
+
+══════════════════════════════════════════════════════════════════════════════
+THAY ĐỔI 3: Sửa lỗi 'CauHinh' object has no attribute 'so_chieu_an'
+══════════════════════════════════════════════════════════════════════════════
+
+  Vấn đề: Code trong routes.py dùng cau_hinh.so_chieu_an nhưng class CauHinh
+  trong huan_luyen.py dùng tên kich_thuoc_an.
+
+  Nguyên nhân: Hai file dùng tên biến khác nhau cho cùng một ý nghĩa.
+
+  Sửa trong routes.py:
+    TRƯỚC: kich_thuoc_an = cau_hinh.so_chieu_an
+    SAU:   kich_thuoc_an = cau_hinh.kich_thuoc_an  (khớp với CauHinh)
+
+    TRƯỚC: kich_thuoc_ra = cau_hinh.so_chieu_ra
+    SAU:   kich_thuoc_ra = cau_hinh.kich_thuoc_ra
+
+══════════════════════════════════════════════════════════════════════════════
+THAY ĐỔI 4: Sửa file picker — dùng askopenfilename thay askdirectory
+══════════════════════════════════════════════════════════════════════════════
+
+  Vấn đề: Người dùng cần chọn file .json để so sánh model, nhưng code cũ
+  dùng askdirectory() (chọn thư mục) → không tìm được file JSON cụ thể.
+
+  Sửa trong admin.py:
+    TRƯỚC: from tkinter.filedialog import askdirectory
+           cmp_path = askdirectory(title="...")
+    SAU:   from tkinter.filedialog import askopenfilename
+           cmp_path = askopenfilename(
+               title="Chọn file kfold_metrics.json",
+               filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+           )
+
+  Sửa trong routes.py (/api/model/compare):
+    TRƯỚC: tìm kfold_metrics.json trong folder
+    SAU:   if given.is_file() and given.suffix.lower() == ".json":
+               metrics_file = given  # dùng trực tiếp file được chọn
+           else:
+               # tìm trong folder (fallback)
+
+══════════════════════════════════════════════════════════════════════════════
+THAY ĐỔI 5: Sửa FuzzyGCN size mismatch (192/96 vs 256/128)
+══════════════════════════════════════════════════════════════════════════════
+
+  Vấn đề: Các file .pth (weights đã huấn luyện) được lưu với cấu hình
+  kich_thuoc_an=192, kich_thuoc_ra=96. Nhưng khi load lại, code dùng giá trị
+  mặc định 256/128 → lỗi "size mismatch" khi load state_dict.
+
+  Nguyên nhân: PyTorch đòi hỏi model phải được khởi tạo đúng kích thước
+  trước khi load weights vào.
+
+  Giải pháp — tự động đọc kích thước từ file .pth trước khi tạo model:
+
+    state = torch.load(pth_file, map_location="cpu")
+
+    # Đọc chiều ẩn từ ma trận Linear đầu tiên
+    _kich_thuoc_an = int(state["ma_hoa_thuoc.weight"].shape[0])
+
+    # Đọc chiều đầu ra từ bias của GCN layer cuối cùng
+    gcn_bias_keys = [k for k in state if k.startswith("cac_lop_gcn.") and k.endswith(".bias")]
+    last_gcn_bias_key = sorted(gcn_bias_keys)[-1]
+    _kich_thuoc_ra = int(state[last_gcn_bias_key].shape[0])
+
+    # Đếm số lớp GCN
+    _so_lop_gcn = len({k.split(".")[1] for k in state if k.startswith("cac_lop_gcn.")})
+
+    # Tạo model với đúng kích thước
+    model = FuzzyGCN(..., so_chieu_an=_kich_thuoc_an, so_chieu_ra=_kich_thuoc_ra, ...)
+
+══════════════════════════════════════════════════════════════════════════════
+THAY ĐỔI 6: Đơn giản hóa UI chọn file so sánh
+══════════════════════════════════════════════════════════════════════════════
+
+  Vấn đề: UI có ô nhập text + button chọn file → dư thừa, gây nhầm lẫn.
+
+  Sửa trong admin.py:
+    TRƯỚC: - Ô text input để gõ đường dẫn thủ công
+           - Button "📂 Chọn file" cạnh ô text
+           - Hiện đường dẫn dài trong ô text
+
+    SAU:   - Chỉ có button "📂 Chọn file JSON…"
+           - Hiện badge nhỏ dưới button: "✅ ...tên_file.json" hoặc "⬜ Chưa chọn"
+           - Ô nhập tên mô hình (để đặt nhãn hiển thị) riêng biệt
+
+══════════════════════════════════════════════════════════════════════════════
+THAY ĐỔI 7: Thêm bảng thông số song song (yêu cầu hiện tại)
+══════════════════════════════════════════════════════════════════════════════
+
+  Vấn đề: Sau khi so sánh, chỉ có bảng 5 cột số liệu và biểu đồ cột. Admin
+  không thấy được thông tin tổng quan của 2 mô hình bên cạnh nhau.
+
+  Sửa trong admin.py — thêm 3 phần mới vào kết quả so sánh:
+
+  A) Bảng thông tin tổng quan song song ("🗂️ Thông tin mô hình"):
+     Hiển thị dạng 3 cột: [Tiêu đề] | [Mô hình hiện tại] | [Mô hình so sánh]
+     Các dòng: Dataset, K-Fold, AUC (mean), Nguồn file
+     Mô hình hiện tại dùng màu xanh teal (#0d9488)
+     Mô hình so sánh dùng màu xanh indigo (#1e40af)
+
+  B) Bảng chi tiết cải tiến (header 2 dòng):
+     Dòng 1: [trống] | [🧠 Tên dataset hiện tại (span 2 cột)] | [📂 Tên model (span 2 cột)]
+     Dòng 2: [Chỉ số] | Mean | ± Std | Mean | ± Std
+     Cell thắng: tô nền màu nhạt + text đậm + ký hiệu ▲
+     Std hiển thị với tiền tố "±"
+
+  C) Dòng kết luận tự động:
+     Đếm số chỉ số thắng của từng mô hình → hiển thị verdict:
+     Ví dụ: "🧠 B-dataset tốt hơn (5/7 chỉ số)"
+     Màu verdict theo model thắng.
+
+  D) Biểu đồ cột (giữ nguyên từ trước):
+     So sánh mean của từng chỉ số dạng grouped bar chart.
+
+  Dữ liệu lấy từ:
+    - Mô hình hiện tại: session_state["admin_raw_metrics"]["datasets"][dataset]
+    - Mô hình so sánh: cmp_result["path"] → đọc file JSON → lấy trường "dataset", "so_fold"
+
+
+════════════════════════════════════════════════════════════════════════════════
+LƯU Ý TRIỂN KHAI
+════════════════════════════════════════════════════════════════════════════════
+
+  1. Python 3.9 compatibility:
+     - Dùng "from __future__ import annotations" ở đầu file
+     - KHÔNG dùng "str | None" → dùng "Optional[str]" từ typing
+     - KHÔNG dùng "list[str]" → dùng "List[str]" từ typing
+
+  2. Format kfold_metrics.json:
+     - Định dạng cũ (flat): {"AUC": 0.83, "AUPR": 0.80, ...}
+     - Định dạng mới (sau recalculate):
+       {
+         "dataset": "B-dataset",
+         "so_fold": 10,
+         "metrics": {"AUC": {"mean": 0.83, "std": 0.01}, ...},
+         "mean": {"AUC": 0.83, ...},
+         "std": {"AUC": 0.01, ...},
+         "folds": [{"AUC": 0.82, ...}, {"AUC": 0.84, ...}, ...]
+       }
+     - Hàm _flat_mean() và _flat_std() trong admin.py xử lý cả 2 định dạng.
+
+  3. Dataset hiện tại (kfold_metrics.json dạng cũ):
+     B-dataset: AUC=0.8325, AUPR=0.8051, Accuracy=0.7455, F1=0.7261, MCC=0.4963
+     C-dataset: AUC=0.9703, AUPR=0.9612, Accuracy=0.8994, F1=0.8979, MCC=0.8094
+     F-dataset: AUC=0.9644, AUPR=0.9528, Accuracy=0.8862, F1=0.8841, MCC=0.7818
+
+================================================================================
+KẾT THÚC TÀI LIỆU
+================================================================================

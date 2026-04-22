@@ -61,6 +61,12 @@ if __name__ == '__main__':
                         help='weight of L1 sparsity loss on pre-norm firing strengths (gnn_fuzzy only)')
     parser.add_argument('--swa_start_ratio', type=float, default=0.7,
                         help='SWA starts at this fraction of total epochs (e.g. 0.7 = epoch 700/1000)')
+    # Vấn đề 3: Chunked gradient accumulation để tránh OOM khi is_finetuning=True
+    parser.add_argument('--chunk_size', type=int, default=1024,
+                        help='số sample mỗi mini-chunk khi chunked grad accumulation (gnn_fuzzy only)')
+    parser.add_argument('--suspect_score_thr', type=float, default=0.25,
+                        help='chỉ cách ly cặp nghi vấn có combined_score >= ngưỡng này khi training '
+                             '(0.25=an toàn cho dataset có Tanimoto thấp; tăng lên 0.3 nếu muốn cách ly ít hơn)')
 
     args = parser.parse_args()
     args.data_dir = 'data/' + args.dataset + '/'
@@ -175,34 +181,69 @@ if __name__ == '__main__':
                     model.fuzzy_correction.requires_grad_(fuzzy_active)
 
             model.train()
-            _, train_score = model(drdr_graph, didi_graph, drdipr_graph, drug_feature, disease_feature, protein_feature, X_train)
-            train_loss = cross_entropy(train_score, torch.flatten(Y_train))
 
-            # ── Cách 4: Orthogonal diversity loss ────────────────
-            # Push fuzzy rule centers apart so each rule covers a distinct
-            # drug-disease interaction pattern (avoids lazy/duplicate rules).
-            if args.model == 'gnn_fuzzy' and getattr(args, 'ortho_weight', 0.0) > 0 and fuzzy_active:
-                C = model.fuzzy_layer.centers                              # (R, proj_dim)
-                C_norm = fn.normalize(C, dim=-1)                          # unit vectors
-                R_size = C_norm.shape[0]
-                sim_mat = C_norm @ C_norm.T                                # (R, R) cosine sim
-                eye     = torch.eye(R_size, device=C.device)
-                ortho_loss = (sim_mat - eye).pow(2).mean()
-                train_loss = train_loss + args.ortho_weight * ortho_loss
+            if args.model == 'gnn_fuzzy':
+                # ── Vấn đề 3: Chunked gradient accumulation ──────────────
+                # GNN (gt_drug, gt_disease, hgt, transformer fusion) chạy MỘT LẦN
+                # để tạo dr_all, di_all. Sau đó chunk X_train theo sample_level
+                # (interact → fuzzy → mlp) để tránh OOM khi is_finetuning=True.
+                # retain_graph=True giữ GNN graph cho đến chunk cuối cùng.
+                CHUNK = args.chunk_size
+                dr_all, di_all = model._get_embeddings(
+                    drdr_graph, didi_graph, drdipr_graph,
+                    drug_feature, disease_feature, protein_feature)
 
-            # ── Cách 2: L1 Sparsity loss on pre-norm firing strengths ──
-            # raw_w is cached by LearnableFuzzyLayer.forward() during the
-            # training forward pass above — no extra computation needed.
-            # L1 on raw_w (NOT on w_norm): after Wang-Mendel sum(w̃)=1 always
-            # so L1(w̃) is a constant with zero gradient — useless.
-            if args.model == 'gnn_fuzzy' and getattr(args, 'sparse_weight', 0.0) > 0 and fuzzy_active:
-                raw_w = getattr(model.fuzzy_layer, '_last_raw_w', None)
-                if raw_w is not None:
-                    sparsity_loss = raw_w.mean()
-                    train_loss = train_loss + args.sparse_weight * sparsity_loss
+                chunks_x  = torch.split(X_train, CHUNK)
+                chunks_y  = torch.split(torch.flatten(Y_train), CHUNK)
+                n_chunks  = len(chunks_x)
 
-            optimizer.zero_grad()
-            train_loss.backward()
+                optimizer.zero_grad()
+                train_loss = 0.0
+                for c_idx, (x_c, y_c) in enumerate(zip(chunks_x, chunks_y)):
+                    is_last = (c_idx == n_chunks - 1)
+
+                    # Cải tiến C: Bilinear pair — khớp với _get_interact() trong model
+                    dr_s = dr_all[x_c[:, 0]]
+                    di_s = di_all[x_c[:, 1]]
+                    interact   = model.pair_proj(
+                        torch.cat([dr_s, di_s, dr_s * di_s], dim=-1))   # (B, 400)
+                    # Vấn đề 1: is_finetuning=True → tháo .detach() để co-adaptation
+                    fuzzy_in   = interact if fuzzy_active else interact.detach()
+                    fuzzy_out  = model.fuzzy_layer(fuzzy_in)
+                    correction = model.fuzzy_correction(fuzzy_out)
+                    enhanced   = interact + correction
+                    c_score    = model.mlp(enhanced)
+
+                    c_loss = cross_entropy(c_score, y_c) / n_chunks
+
+                    # Ortho loss: chỉ cộng vào chunk cuối (không phụ thuộc batch)
+                    if getattr(args, 'ortho_weight', 0.0) > 0 and fuzzy_active and is_last:
+                        C      = model.fuzzy_layer.centers
+                        C_norm = fn.normalize(C, dim=-1)
+                        R_size = C_norm.shape[0]
+                        sim_mat = C_norm @ C_norm.T
+                        eye    = torch.eye(R_size, device=C.device)
+                        c_loss = c_loss + args.ortho_weight * (sim_mat - eye).pow(2).mean()
+
+                    # Sparsity loss: cộng vào mỗi chunk, chia đều
+                    if getattr(args, 'sparse_weight', 0.0) > 0 and fuzzy_active:
+                        raw_w = getattr(model.fuzzy_layer, '_last_raw_w', None)
+                        if raw_w is not None:
+                            c_loss = c_loss + (args.sparse_weight * raw_w.mean()) / n_chunks
+
+                    # retain_graph cho đến chunk cuối để GNN graph không bị giải phóng sớm
+                    c_loss.backward(retain_graph=not is_last)
+                    train_loss += c_loss.item()
+
+            else:
+                # ── AMNTDDA gốc: full-batch như cũ ───────────────────────
+                _, train_score = model(drdr_graph, didi_graph, drdipr_graph,
+                                       drug_feature, disease_feature, protein_feature,
+                                       X_train)
+                train_loss = cross_entropy(train_score, torch.flatten(Y_train))
+                optimizer.zero_grad()
+                train_loss.backward()
+
             optimizer.step()
 
             with torch.no_grad():

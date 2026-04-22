@@ -1,48 +1,35 @@
 """
-AMNTDDA_Fuzzy v2 – AMNTDDA augmented with an Enhanced Learnable Fuzzy Inference Layer.
+AMNTDDA_Fuzzy – Mô hình cải tiến, kế thừa từ AMNTDDA gốc và thêm lớp Fuzzy Inference.
 
-Architecture
-------------
-  Backbone  : identical to AMNTDDA
-                 GT-Drug  (drug–drug similarity graph)
-               + GT-Disease (disease–disease similarity graph)
-               + HGTConv  (heterogeneous drug–disease–protein knowledge graph)
-               + TransformerEncoder fusion
+Thiết kế
+--------
+  Backbone  : GIỮ NGUYÊN toàn bộ từ lớp AMNTDDA gốc (model/AMNTDDA.py).
+              Không sao chép lại code – dùng kế thừa: class AMNTDDA_Fuzzy(AMNTDDA).
 
-  Interaction: Rich vector cat(dr*di, |dr-di|) → Linear(800→400) + GELU + LN
-                 Element-wise product captures co-activation;
-                 absolute difference captures asymmetric/contrastive signal.
+  Cải tiến (các thành phần mới, KHÔNG có trong AMNTDDA gốc):
+    ① LearnableFuzzyLayer  (TSK-type, Gaussian MFs, fully differentiable)
+         in       = 400-dim  (gt_out_dim × 2, giống AMNTDDA)
+         proj_dim = 64       (chiếu xuống trước T-norm để tránh tích vanish)
+         out      = 256-dim  fuzzy-activated features + residual
+    ② fuzzy_correction  (Linear 256 → 400): cộng residual vào interaction vector
+    ③ MLP giữ nguyên kích thước 400-dim input — kết quả so sánh công bằng với gốc
 
-  New layer : LearnableFuzzyLayer v2  (TSK-type, Gaussian MFs, fully differentiable)
-                 in       = 400-dim rich interaction vector
-                 proj_dim = 64   (projects input BEFORE T-norm to prevent collapse)
-                 out      = 256-dim fuzzy-activated features + residual from projection
+  Luồng forward (AMNTDDA_Fuzzy):
+    [Backbone AMNTDDA] → interact (400) → fuzzy_layer → correction (400)
+    → enhanced = interact + correction → mlp → 2 logits
 
-  Classifier: MLP input = cat(fuzzy_out:256, interaction:400) = 656-dim
+  Tham số thêm (có giá trị mặc định nếu không truyền vào):
+    --fuzzy_rules 32  --fuzzy_dim 256  --fuzzy_proj_dim 64
 
-Key improvements over v1
-  ① Input projection 400→proj_dim BEFORE T-norm.
-      Problem solved: product T-norm over 400 dims collapses to ~0 for all rules,
-      meaning the fuzzy layer learned nothing.  Projecting to 64 dims first keeps
-      firing strengths in a healthy range (0.1–0.9 per rule).
-  ② RBF mean T-norm: w_k = exp(−mean_i((x_i−c_ki)²/σ_ki²))
-      Numerically stable; still a valid similarity measure.  Replaces product T-norm.
-  ③ Residual connection: out = LN(consequent(w̃) + res_proj(x_proj))
-      Prevents gradient vanishing through the fuzzy layer.
-  ④ Rich interaction vector cat(mul, diff) replaces plain element-wise product.
-  ⑤ GELU activations and reduced dropout in classifier MLP.
-
-Training
-  Run train_DDA.py with --model gnn_fuzzy  (see that file for all flags).
-  Extra args: --fuzzy_rules 32  --fuzzy_dim 256  --fuzzy_proj_dim 64
-  Checkpoint saved to web_app/models/best_model_fuzzy_{dataset}.pt
+Training:
+  Run train_DDA.py với --model gnn_fuzzy
+  Checkpoint lưu tại web_app/models/best_model_fuzzy_{dataset}.pt
 """
 
 import dgl
-import dgl.nn.pytorch
 import torch
 import torch.nn as nn
-from model import gt_net_drug, gt_net_disease
+from model.AMNTDDA import AMNTDDA  # Import mô hình gốc — không sửa file đó
 
 
 # ════════════════════════════════════════════════════════════════
@@ -94,6 +81,11 @@ class LearnableFuzzyLayer(nn.Module):
         # init = log(1) = 0  →  T_init = 1.0 (neutral starting point)
         self.log_temperature = nn.Parameter(torch.zeros(1))
 
+        # ④ Learnable blend: α·Gaussian + (1-α)·Triangular
+        # Gaussian: smooth gradient; Triangular: kháng outlier cứng hơn
+        # α_init = sigmoid(0) = 0.5  →  cân bằng ban đầu
+        self.log_alpha_blend = nn.Parameter(torch.zeros(1))
+
         # Fuzzy Dropout — only active during training
         self.rule_dropout = nn.Dropout(p=fuzzy_dropout)
 
@@ -120,9 +112,17 @@ class LearnableFuzzyLayer(nn.Module):
         sigma = torch.exp(self.log_sigmas).unsqueeze(0).clamp(min=1e-3) # (1, R, P)
 
         # ③ Temperature scaling applied inside the exponent
-        T       = torch.exp(self.log_temperature).clamp(min=0.1, max=10.0)  # scalar
-        neg_sq  = -(diff / sigma).pow(2) / T                             # (B, R, P)
-        raw_w   = torch.exp(neg_sq.mean(dim=-1))                         # (B, R) pre-norm
+        T      = torch.exp(self.log_temperature).clamp(min=0.1, max=10.0)  # scalar
+        neg_sq = -(diff / sigma).pow(2) / T                              # (B, R, P)
+
+        # Cải tiến B: Gaussian + Triangular MF blend (học từ FuzzyGCN)
+        # Gaussian: smooth, gradient liên tục
+        gauss_w     = torch.exp(neg_sq.mean(dim=-1))                          # (B, R)
+        # Triangular: cứng hơn, không bị nhiễu xa tâm → kháng outlier tốt hơn
+        tri_w       = (1.0 - (diff.abs() / sigma).mean(dim=-1)).clamp(min=0.0) # (B, R)
+        # α tự học: α·Gaussian + (1-α)·Triangular
+        alpha_blend = torch.sigmoid(self.log_alpha_blend)
+        raw_w       = alpha_blend * gauss_w + (1.0 - alpha_blend) * tri_w     # (B, R) pre-norm
 
         # Wang-Mendel normalisation
         denom  = raw_w.sum(dim=-1, keepdim=True).clamp(min=1e-8)
@@ -161,63 +161,87 @@ class LearnableFuzzyLayer(nn.Module):
 
 
 # ════════════════════════════════════════════════════════════════
-#  AMNTDDA_Fuzzy  (full model)
+#  FuzzyInputGate  — Lọc nhiễu đặc trưng đầu vào (LopFuzzy style)
 # ════════════════════════════════════════════════════════════════
 
-class AMNTDDA_Fuzzy(nn.Module):
+class FuzzyInputGate(nn.Module):
     """
-    AMNTDDA_Fuzzy v2 with improved fuzzy layer and richer interaction vector.
+    Cải tiến A: Input-level fuzzy denoising gate (lấy cảm hứng từ LopFuzzy).
 
-    The fuzzy layer sits between the interaction vector and the MLP classifier:
-      rich_interact (400) → LearnableFuzzyLayer v2 → fuzzy_out (256)
-      cat(fuzzy_out, rich_interact) → MLP → 2 logits
+    Với mỗi chiều i của đặc trưng đầu vào:
+        output_i = x_i * m_i(x_i)
+        m_i = α · gauss_i + (1-α) · tri_i
 
-    Interaction vector (④):
-      Instead of plain dr*di, use cat(dr*di, |dr-di|)→ Linear(800→400).
-      Element-wise product captures co-activation;
-      absolute difference captures asymmetric/contrastive signal.
+    - Gaussian:   m_gauss_i = exp(-(x_i - μ_i)² / (2σ_i²))
+    - Triangular: m_tri_i   = max(0, 1 - |x_i - μ_i| / σ_i)
+    - α = sigmoid(log_alpha) — tỉ lệ pha trộn học được
 
-    Extra args (with defaults used if absent from checkpoint):
-      args.fuzzy_rules    = 32   number of TSK fuzzy rules
-      args.fuzzy_dim      = 256  output dimension of the fuzzy layer
-      args.fuzzy_proj_dim = 64   projection dim inside LearnableFuzzyLayer
+    Ý nghĩa: Chiều nào lệch xa tâm μ (outlier / nhiễu) bị giảm trọng số
+    trước khi vào GNN backbone → mạng ít bị nhiễu chi phối.
+
+    Init: log_sigma = 2.0  (σ ≈ 7.4 >> khoảng giá trị input) → gate ≈ 1.0 ban đầu
+    → Hành xử như identity lúc đầu, dần học ra cổng lọc phù hợp.
+    """
+
+    def __init__(self, in_features: int):
+        super().__init__()
+        self.mu        = nn.Parameter(torch.zeros(in_features))
+        # log_sigma = 2.0 → σ ≈ 7.4 → gate ≈ 1 với input chuẩn hóa → near-identity init
+        self.log_sigma = nn.Parameter(torch.full((in_features,), 2.0))
+        self.log_alpha = nn.Parameter(torch.zeros(1))   # α_init = 0.5
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x : (N, in_features) → (N, in_features)
+        Áp dụng fuzzy gate per-dimension.
+        """
+        sigma = torch.exp(self.log_sigma).clamp(min=1e-3)   # (F,)
+        diff  = x - self.mu                                   # (N, F)
+        # Gaussian gate
+        gauss = torch.exp(-(diff / sigma).pow(2) / 2)        # (N, F)
+        # Triangular gate
+        tri   = (1.0 - diff.abs() / sigma).clamp(min=0.0)    # (N, F)
+        # Learnable blend
+        alpha = torch.sigmoid(self.log_alpha)                 # scalar
+        m     = alpha * gauss + (1.0 - alpha) * tri           # (N, F)
+        return x * m
+
+
+# ════════════════════════════════════════════════════════════════
+#  AMNTDDA_Fuzzy  — kế thừa AMNTDDA, chỉ thêm Fuzzy layer mới
+# ════════════════════════════════════════════════════════════════
+
+class AMNTDDA_Fuzzy(AMNTDDA):
+    """
+    Mô hình cải tiến kế thừa toàn bộ backbone từ AMNTDDA gốc.
+
+    __init__ gọi super().__init__(args) để lấy tất cả các lớp backbone,
+    sau đó bổ sung thêm LearnableFuzzyLayer và fuzzy_correction.
+
+    forward tái sử dụng các lớp của parent (gt_drug, gt_disease, hgt,
+    drug_trans, disease_trans, mlp) và chèn bước xử lý Fuzzy vào giữa
+    interaction vector và MLP.
+
+    Tham số thêm (có giá trị mặc định):
+      args.fuzzy_rules    = 32   số luật TSK
+      args.fuzzy_dim      = 256  chiều output của fuzzy layer
+      args.fuzzy_proj_dim = 64   chiều proj bên trong LearnableFuzzyLayer
     """
 
     def __init__(self, args):
-        super().__init__()
-        self.args = args
-        _device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # ── Khởi tạo toàn bộ backbone từ AMNTDDA gốc ──────────────
+        super().__init__(args)
 
-        # ── Backbone (identical to AMNTDDA) ──────────────────────
-        self.drug_linear    = nn.Linear(300, args.hgt_in_dim)
-        self.protein_linear = nn.Linear(320, args.hgt_in_dim)
+        # ── Vấn đề 2: Xoá Dead Code (không sửa file gốc) ──────────
+        # AMNTDDA.__init__ tạo drug_tr và disease_tr (2 nn.Transformer full)
+        # nhưng AMNTDDA.forward() không bao giờ dùng chúng.
+        # Xoá ngay sau super().__init__ để giải phóng ~84MB VRAM.
+        del self.drug_tr
+        del self.disease_tr
 
-        self.gt_drug = gt_net_drug.GraphTransformer(
-            _device, args.gt_layer, args.drug_number,
-            args.gt_out_dim, args.gt_out_dim, args.gt_head, args.dropout)
-        self.gt_disease = gt_net_disease.GraphTransformer(
-            _device, args.gt_layer, args.disease_number,
-            args.gt_out_dim, args.gt_out_dim, args.gt_head, args.dropout)
+        interact_dim = args.gt_out_dim * 2          # 400 (giống baseline)
 
-        self.hgt_dgl = dgl.nn.pytorch.conv.HGTConv(
-            args.hgt_in_dim, int(args.hgt_in_dim / args.hgt_head),
-            args.hgt_head, 3, 3, args.dropout)
-        self.hgt_dgl_last = dgl.nn.pytorch.conv.HGTConv(
-            args.hgt_in_dim, args.hgt_head_dim,
-            args.hgt_head, 3, 3, args.dropout)
-        self.hgt = nn.ModuleList()
-        for _ in range(args.hgt_layer - 1):
-            self.hgt.append(self.hgt_dgl)
-        self.hgt.append(self.hgt_dgl_last)
-
-        encoder_layer      = nn.TransformerEncoderLayer(
-            d_model=args.gt_out_dim, nhead=args.tr_head)
-        self.drug_trans    = nn.TransformerEncoder(encoder_layer, num_layers=args.tr_layer)
-        self.disease_trans = nn.TransformerEncoder(encoder_layer, num_layers=args.tr_layer)
-
-        interact_dim = args.gt_out_dim * 2                           # 400
-
-        # ── Fuzzy Layer (v3) ─────────────────────────────────────
+        # ── Thành phần mới: Fuzzy layer + residual correction ─────
         fuzzy_rules    = getattr(args, 'fuzzy_rules',    32)
         fuzzy_dim      = getattr(args, 'fuzzy_dim',     256)
         fuzzy_proj_dim = getattr(args, 'fuzzy_proj_dim', 64)
@@ -227,33 +251,76 @@ class AMNTDDA_Fuzzy(nn.Module):
             out_features=fuzzy_dim, proj_dim=fuzzy_proj_dim,
             fuzzy_dropout=fuzzy_dropout)
 
-        # ── Fuzzy residual correction (fuzzy_dim → interact_dim) ─
-        # Projects fuzzy features back to interaction space as a residual
-        # correction.  Small-std init so correction ≈ 0 at start (model
-        # behaves like baseline until fuzzy layer warms up).
+        # Residual correction: chiếu fuzzy_out về interact_dim rồi cộng vào.
+        # Init std nhỏ → ban đầu correction ≈ 0, model hành xử như baseline.
         self.fuzzy_correction = nn.Linear(fuzzy_dim, interact_dim, bias=False)
         nn.init.normal_(self.fuzzy_correction.weight, std=0.01)
 
-        # ── MLP — identical structure to AMNTDDA baseline ────────
-        # Input dim kept at 400 (same as baseline) so parameter count
-        # and regularisation exactly match the proven configuration.
-        self.mlp = nn.Sequential(
-            nn.Linear(interact_dim, 1024), nn.ReLU(), nn.Dropout(0.4),
-            nn.Linear(1024, 1024),         nn.ReLU(), nn.Dropout(0.4),
-            nn.Linear(1024, 256),          nn.ReLU(), nn.Dropout(0.4),
-            nn.Linear(256,  2),
-        )
+        # ── Cải tiến A: FuzzyInputGate (LopFuzzy — lọc nhiễu feature đầu vào) ──
+        # Áp dụng trước drug_linear / protein_linear / HGT, lọc outlier per-dim.
+        # drug: 300-dim (mol2vec), disease: 64-dim (DiseaseFeature), protein: 320-dim (ESM)
+        self.drug_gate    = FuzzyInputGate(300)
+        self.disease_gate = FuzzyInputGate(args.hgt_in_dim)   # 64-dim
+        self.protein_gate = FuzzyInputGate(320)
+
+        # ── Cải tiến C: Bilinear Pair Interaction (học từ FuzzyGCN) ────────────
+        # Thay vì interact = dr * di (Hadamard, 400-dim),
+        # dùng [dr ‖ di ‖ dr⊙di] (1200-dim) → proj 400 → phong phú hơn.
+        # Xavier init → bắt đầu ổn định, nhanh hội tụ.
+        self.pair_proj = nn.Linear(interact_dim * 3, interact_dim, bias=False)
+        nn.init.xavier_uniform_(self.pair_proj.weight)
 
     # ── Forward pass ─────────────────────────────────────────────
 
     def forward(self, drdr_graph, didi_graph, drdipr_graph,
-                drug_feature, disease_feature, protein_feature, sample):
+                drug_feature, disease_feature, protein_feature, sample,
+                is_finetuning: bool = False):
+        """
+        is_finetuning=False (mặc định): giống baseline, .detach() chặn gradient
+            đi qua fuzzy layer về backbone (ổn định, dùng trong warmup).
+        is_finetuning=True:  tháo .detach() để fuzzy layer và backbone
+            co-adapt với nhau — bật sau fuzzy_warmup epochs.
+        """
+        # ── Backbone + interaction vector ────────────────────────
+        dr, interact = self._get_interact(
+            drdr_graph, didi_graph, drdipr_graph,
+            drug_feature, disease_feature, protein_feature, sample)  # (B, 400)
 
-        # Similarity graph encoders
+        # ── Phần cải tiến: Fuzzy residual correction ─────────────
+        # Vấn đề 1: is_finetuning=True → tháo .detach() để gradient từ
+        # fuzzy layer chạy ngược về backbone (co-adaptation).
+        fuzzy_in   = interact if is_finetuning else interact.detach()
+        fuzzy_out  = self.fuzzy_layer(fuzzy_in)                  # (B, 256)
+        correction = self.fuzzy_correction(fuzzy_out)            # (B, 400)
+        enhanced   = interact + correction                       # (B, 400)
+
+        # ── MLP từ AMNTDDA gốc — input dim 400 giữ nguyên ────────
+        output = self.mlp(enhanced)                              # (B, 2)
+
+        return dr, output
+
+    # ── Helpers ──────────────────────────────────────────────────
+
+    def _get_embeddings(self, drdr_graph, didi_graph, drdipr_graph,
+                        drug_feature, disease_feature, protein_feature):
+        """
+        Chạy toàn bộ GNN backbone (GT-Drug, GT-Disease, HGT, Transformer fusion)
+        và trả về embedding đầy đủ:
+          dr : (N_drug,    gt_out_dim*2)
+          di : (N_disease, gt_out_dim*2)
+
+        Tách riêng khỏi _get_interact để train_DDA có thể gọi một lần duy nhất
+        rồi chunk phần sample-level (interact → fuzzy → MLP) → giải quyết
+        Vấn đề 3: tránh OOM khi is_finetuning=True.
+        """
+        # Cải tiến A: FuzzyInputGate lọc nhiễu trước khi vào backbone
+        drug_feature    = self.drug_gate(drug_feature)
+        disease_feature = self.disease_gate(disease_feature)
+        protein_feature = self.protein_gate(protein_feature)
+
         dr_sim = self.gt_drug(drdr_graph)
         di_sim = self.gt_disease(didi_graph)
 
-        # HGT over heterogeneous graph
         drug_feature    = self.drug_linear(drug_feature)
         protein_feature = self.protein_linear(protein_feature)
 
@@ -272,26 +339,24 @@ class AMNTDDA_Fuzzy(nn.Module):
         di_hgt = hgt_out[self.args.drug_number:
                          self.args.disease_number + self.args.drug_number, :]
 
-        # Self-fusion — identical to AMNTDDA baseline
-        dr = self.drug_trans(torch.stack((dr_sim, dr_hgt), dim=1))        # (N_drug, 2, d)
-        di = self.disease_trans(torch.stack((di_sim, di_hgt), dim=1))     # (N_disease, 2, d)
-        dr = dr.view(self.args.drug_number,    2 * self.args.gt_out_dim)  # (N_drug, 400)
-        di = di.view(self.args.disease_number, 2 * self.args.gt_out_dim)  # (N_disease, 400)
+        dr = self.drug_trans(torch.stack((dr_sim, dr_hgt), dim=1))
+        di = self.disease_trans(torch.stack((di_sim, di_hgt), dim=1))
+        dr = dr.view(self.args.drug_number,    2 * self.args.gt_out_dim)
+        di = di.view(self.args.disease_number, 2 * self.args.gt_out_dim)
+        return dr, di
 
-        # Interaction: element-wise product — identical to AMNTDDA baseline
-        interact = dr[sample[:, 0]] * di[sample[:, 1]]                    # (B, 400)
-
-        # Fuzzy residual correction — gradient-decoupled.
-        # detach() keeps backbone gradient identical to baseline;
-        # fuzzy_lr_ratio=1.0 lets the fuzzy layer learn fast independently.
-        fuzzy_out  = self.fuzzy_layer(interact.detach())                  # (B, 256)
-        correction = self.fuzzy_correction(fuzzy_out)                     # (B, 400)
-        enhanced   = interact + correction                                 # (B, 400)
-
-        # Classifier: same 400-dim input as AMNTDDA baseline
-        output = self.mlp(enhanced)                                        # (B, 2)
-
-        return dr, output
+    def _get_interact(self, drdr_graph, didi_graph, drdipr_graph,
+                      drug_feature, disease_feature, protein_feature,
+                      sample):
+        """Trả về (dr, interact) — dùng cho forward() và get_firing_strengths()."""
+        dr, di   = self._get_embeddings(drdr_graph, didi_graph, drdipr_graph,
+                                        drug_feature, disease_feature, protein_feature)
+        # Cải tiến C: Bilinear pair interaction [dr ‖ di ‖ dr⊙di] → proj 400
+        dr_s = dr[sample[:, 0]]                                # (B, 400)
+        di_s = di[sample[:, 1]]                                # (B, 400)
+        interact = self.pair_proj(
+            torch.cat([dr_s, di_s, dr_s * di_s], dim=-1))     # (B, 400)
+        return dr, interact
 
     # ── Interpretability ─────────────────────────────────────────
 
@@ -304,28 +369,7 @@ class AMNTDDA_Fuzzy(nn.Module):
         Shape: (n_samples, n_rules)
         """
         with torch.no_grad():
-            # Similarity encoders
-            dr_sim = self.gt_drug(drdr_graph)
-            di_sim = self.gt_disease(didi_graph)
-
-            # HGT
-            df = self.drug_linear(drug_feat)
-            pf = self.protein_linear(protein_feat)
-            drdipr_graph.ndata['h'] = {'drug': df, 'disease': disease_feat, 'protein': pf}
-            g  = dgl.to_homogeneous(drdipr_graph, ndata='h')
-            f  = torch.cat((df, disease_feat, pf), dim=0)
-            for layer in self.hgt:
-                hgt_out = layer(g, f, g.ndata['_TYPE'], g.edata['_TYPE'], presorted=True)
-                f = hgt_out
-
-            dr_hgt = hgt_out[:self.args.drug_number, :]
-            di_hgt = hgt_out[self.args.drug_number:
-                             self.args.disease_number + self.args.drug_number, :]
-
-            dr = self.drug_trans(torch.stack((dr_sim, dr_hgt), dim=1))
-            di = self.disease_trans(torch.stack((di_sim, di_hgt), dim=1))
-            dr = dr.view(self.args.drug_number,    2 * self.args.gt_out_dim)
-            di = di.view(self.args.disease_number, 2 * self.args.gt_out_dim)
-            interact = dr[sample[:, 0]] * di[sample[:, 1]]
-
+            _, interact = self._get_interact(
+                drdr_graph, didi_graph, drdipr_graph,
+                drug_feat, disease_feat, protein_feat, sample)
             return self.fuzzy_layer.firing_strengths(interact)
